@@ -105,6 +105,8 @@ struct App {
 const WIN_MOVE_THRESHOLD: f64 = 6.0;
 /// Cap OS window moves even while walking (~12 Hz).
 const WIN_MOVE_MIN_INTERVAL: Duration = Duration::from_millis(80);
+/// Shared alpha hit pad for passthrough capture and click/context menu.
+const PET_HIT_PAD: i32 = 4;
 
 impl App {
     fn new(screen_w: f64, screen_h: f64) -> Self {
@@ -322,9 +324,8 @@ impl App {
                 return;
             }
             // When ignoresMouseEvents is on, the window gets no CursorMoved —
-            // poll global cursor and hit-test the same opaque pixels as clicks
-            // (with a small pad so the edge stays grab-able).
-            let over = self.cursor_hits_pet(4);
+            // poll global cursor and hit-test the same opaque pixels as clicks.
+            let over = self.cursor_hits_pet();
             let want_ignore = !over;
             if want_ignore != self.ignore_mouse {
                 self.ignore_mouse = want_ignore;
@@ -333,9 +334,13 @@ impl App {
         }
     }
 
-    /// Desktop cursor → window-local hit, shared by click and passthrough.
+    fn hits_pet_local(&self, lx: f64, ly: f64) -> bool {
+        render::hit_pet_padded(&self.pixels, WIN, WIN, lx, ly, PET_HIT_PAD)
+    }
+
+    /// Desktop cursor → window-local hit (same pad as click / context menu).
     #[cfg(target_os = "macos")]
-    fn cursor_hits_pet(&self, pad: i32) -> bool {
+    fn cursor_hits_pet(&self) -> bool {
         let Some((cx, cy)) = macos::cursor_logical_top_left() else {
             return false;
         };
@@ -343,9 +348,7 @@ impl App {
             Some(p) => p,
             None => self.desired_win_pos(),
         };
-        let lx = cx - wx;
-        let ly = cy - wy;
-        render::hit_pet_padded(&self.pixels, WIN, WIN, lx, ly, pad)
+        self.hits_pet_local(cx - wx, cy - wy)
     }
 
     fn schedule_wake(&self, event_loop: &ActiveEventLoop) {
@@ -667,7 +670,7 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 if let Some((lx, ly)) = self.cursor_logical_in_window() {
-                    if render::hit_pet(&self.pixels, WIN, WIN, lx, ly) {
+                    if self.hits_pet_local(lx, ly) {
                         self.show_ctx_menu();
                     }
                 }
@@ -679,7 +682,7 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 if let Some((lx, ly)) = self.cursor_logical_in_window() {
                     if let Some(window) = &self.window {
-                        if render::hit_pet(&self.pixels, WIN, WIN, lx, ly) {
+                        if self.hits_pet_local(lx, ly) {
                             self.pet.on_press();
                             if let Some((dx, dy)) = self.desk_from_cursor_local(lx, ly) {
                                 self.press = Some(PressState {

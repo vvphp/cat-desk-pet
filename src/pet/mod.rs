@@ -1618,8 +1618,12 @@ impl Pet {
         self.x += dx * k;
         self.floor_y = (self.floor_y + dy * k).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
         self.y = self.floor_y;
+        let y_before = self.y;
         self.clamp_pos();
-        self.floor_y = self.y.clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        // Only re-sync floor if screen clamp actually moved y.
+        if (self.y - y_before).abs() > f64::EPSILON {
+            self.floor_y = self.y.clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        }
     }
 
     fn clamp_pos(&mut self) {
