@@ -104,9 +104,6 @@ struct App {
     view_h: u32,
     last_win_move: Instant,
     last_passthrough: Instant,
-    /// Previous `NSEvent.pressedMouseButtons` (macOS global click poll).
-    #[cfg(target_os = "macos")]
-    prev_mouse_buttons: u64,
 }
 
 /// How far (logical px) the pet may drift inside the window before we move the OS window.
@@ -149,8 +146,6 @@ impl App {
             view_h: WIN,
             last_win_move: now,
             last_passthrough: now,
-            #[cfg(target_os = "macos")]
-            prev_mouse_buttons: 0,
         }
     }
 
@@ -330,12 +325,33 @@ impl App {
     fn update_passthrough(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            // Expanded drawable bounds must never capture the desktop. Keep the
-            // OS window permanently click-through; clicks are polled globally.
+            let now = Instant::now();
+            let holding = self.pet.dragging || self.press.is_some();
+            if !holding && now.duration_since(self.last_passthrough) < self.passthrough_interval()
+            {
+                return;
+            }
+            self.last_passthrough = now;
+
             let Some(window) = &self.window else { return };
-            if !self.ignore_mouse {
-                self.ignore_mouse = true;
-                macos::set_ignore_mouse(window, true);
+            // While holding, keep capture so drag/release stay on this window.
+            if holding {
+                if self.ignore_mouse {
+                    self.ignore_mouse = false;
+                    macos::set_ignore_mouse(window, false);
+                }
+                return;
+            }
+            // Large drawable stays click-through except over the pet body ellipse
+            // — so toys/flyers/transparent strips never block the desktop, but a
+            // click on the cat is swallowed by us (not Finder underneath).
+            let over = macos::cursor_logical_top_left()
+                .map(|(cx, cy)| self.hits_pet_body(cx, cy))
+                .unwrap_or(false);
+            let want_ignore = !over;
+            if want_ignore != self.ignore_mouse {
+                self.ignore_mouse = want_ignore;
+                macos::set_ignore_mouse(window, want_ignore);
             }
         }
     }
@@ -364,89 +380,9 @@ impl App {
         }
     }
 
-    /// Global left/right button edges — required because the drawable window
-    /// always ignores mouse events (see `update_passthrough`).
-    #[cfg(target_os = "macos")]
-    fn poll_global_input(&mut self) {
-        let buttons = macos::pressed_mouse_buttons();
-        let left = buttons & 1 != 0;
-        let right = buttons & 2 != 0;
-        let prev_left = self.prev_mouse_buttons & 1 != 0;
-        let prev_right = self.prev_mouse_buttons & 2 != 0;
-        self.prev_mouse_buttons = buttons;
-
-        let Some((cx, cy)) = macos::cursor_logical_top_left() else {
-            return;
-        };
-        let over = self.hits_pet_body(cx, cy);
-
-        if right && !prev_right && over {
-            self.show_ctx_menu();
-        }
-
-        if left && !prev_left && over {
-            self.pet.on_press();
-            self.press = Some(PressState {
-                t0: Instant::now(),
-                desk_x: cx,
-                desk_y: cy,
-                dragging: false,
-                petting: false,
-            });
-            self.drag_grab = Some((cx - self.pet.x, cy - self.pet.y));
-            self.next_frame = Instant::now();
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-        }
-
-        let Some(press) = self.press.as_ref() else {
-            return;
-        };
-        if left {
-            let promote = !press.dragging
-                && !press.petting
-                && ((cx - press.desk_x).powi(2) + (cy - press.desk_y).powi(2)).sqrt() > 8.0;
-            let dragging = press.dragging || promote;
-            if promote {
-                if let Some(p) = self.press.as_mut() {
-                    p.dragging = true;
-                }
-                self.pet.begin_drag();
-            }
-            if dragging {
-                if let Some((gx, gy)) = self.drag_grab {
-                    self.pet.drag_to(cx - gx, cy - gy);
-                    self.sync_window_pos(true);
-                    self.next_frame = Instant::now();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-        } else {
-            let was_drag = press.dragging || self.pet.dragging;
-            let was_pet = press.petting || self.pet.mode == Mode::Pet;
-            self.press = None;
-            self.drag_grab = None;
-            if was_drag {
-                self.pet.end_drag();
-            } else if was_pet {
-                self.pet.end_pet();
-            }
-            self.next_frame = Instant::now();
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn poll_global_input(&mut self) {}
-
     fn schedule_wake(&self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        // While pressing/dragging, poll faster so global cursor tracking stays smooth.
+        // Hover/press: wake often enough to toggle ignore before the click.
         let input_iv = if self.press.is_some() || self.pet.dragging {
             Duration::from_millis(16)
         } else {
@@ -712,21 +648,18 @@ impl ApplicationHandler<UserEvent> for App {
             self.pet.update(dt);
             self.sync_window_pos(false);
             self.update_passthrough();
-            self.poll_global_input();
             self.sync_flash_overlay(event_loop);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
             self.next_frame = now + self.pet.mode.frame_interval();
         } else {
-            // Keep click-through + global input alive between paint frames.
+            // Refresh pet-ellipse ignore toggle between paints (pre-click capture).
             self.update_passthrough();
-            self.poll_global_input();
             if self.pet.flash > 0.02 {
                 self.sync_flash_overlay(event_loop);
             }
         }
-        self.last_passthrough = Instant::now();
         self.schedule_wake(event_loop);
 
         // Drain menu events (also delivered as UserEvent when proxy works).
@@ -810,6 +743,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.redraw();
                 self.update_passthrough();
             }
+            // On macOS these fire only while ignore=false (cursor over pet ellipse
+            // or during an active press/drag). Transparent expanded areas stay
+            // click-through via `update_passthrough`.
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.scale.max(0.01);
                 let lx = position.x / scale;
@@ -885,6 +821,12 @@ impl ApplicationHandler<UserEvent> for App {
                                     petting: false,
                                 });
                                 self.drag_grab = Some((dx - self.pet.x, dy - self.pet.y));
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                // Own this click (hover toggle may have raced).
+                                macos::set_ignore_mouse(window, false);
+                                self.ignore_mouse = false;
                             }
                             self.next_frame = Instant::now();
                             window.request_redraw();

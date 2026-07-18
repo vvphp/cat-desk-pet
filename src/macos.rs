@@ -77,11 +77,6 @@ pub fn set_window_alpha(window: &Window, alpha: f64) {
     ns_window.setAlphaValue(alpha.clamp(0.0, 1.0));
 }
 
-/// Bit0 = left, bit1 = right (AppKit `NSEvent.pressedMouseButtons`).
-pub fn pressed_mouse_buttons() -> u64 {
-    NSEvent::pressedMouseButtons() as u64
-}
-
 /// Present straight ARGB `0xAARRGGBB` pixels with real transparency via CALayer.
 ///
 /// softbuffer 0.4's macOS backend uses `CGImageAlphaInfo::NoneSkipFirst`, which
