@@ -878,6 +878,10 @@ pub fn hit_pet(buf: &[u32], w: u32, h: u32, lx: f64, ly: f64) -> bool {
 
 /// Alpha hit-test with optional padding (passthrough uses a small pad).
 pub fn hit_pet_padded(buf: &[u32], w: u32, h: u32, lx: f64, ly: f64, pad: i32) -> bool {
+    let need = (w as usize).saturating_mul(h as usize);
+    if w == 0 || h == 0 || buf.len() < need {
+        return false;
+    }
     let x = lx.floor() as i32;
     let y = ly.floor() as i32;
     let wi = w as i32;

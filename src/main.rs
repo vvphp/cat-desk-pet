@@ -104,6 +104,9 @@ struct App {
     view_h: u32,
     last_win_move: Instant,
     last_passthrough: Instant,
+    /// Previous `NSEvent.pressedMouseButtons` (macOS global click poll).
+    #[cfg(target_os = "macos")]
+    prev_mouse_buttons: u64,
 }
 
 /// How far (logical px) the pet may drift inside the window before we move the OS window.
@@ -146,6 +149,8 @@ impl App {
             view_h: WIN,
             last_win_move: now,
             last_passthrough: now,
+            #[cfg(target_os = "macos")]
+            prev_mouse_buttons: 0,
         }
     }
 
@@ -182,6 +187,10 @@ impl App {
             let _ = window.request_inner_size(LogicalSize::new(lw, lh));
             self.view_w = lw;
             self.view_h = lh;
+            // Keep hit/draw buffer in sync before the next redraw (passthrough
+            // may run in the same tick).
+            let need = (lw as usize).saturating_mul(lh as usize);
+            self.pixels.resize(need, 0);
         }
 
         if should_move {
@@ -321,42 +330,28 @@ impl App {
     fn update_passthrough(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            let now = Instant::now();
-            if !self.pet.dragging
-                && now.duration_since(self.last_passthrough) < self.passthrough_interval()
-            {
-                return;
-            }
-            self.last_passthrough = now;
-
+            // Expanded drawable bounds must never capture the desktop. Keep the
+            // OS window permanently click-through; clicks are polled globally.
             let Some(window) = &self.window else { return };
-            if self.pet.dragging {
-                if self.ignore_mouse {
-                    self.ignore_mouse = false;
-                    macos::set_ignore_mouse(window, false);
-                }
-                return;
-            }
-            // When ignoresMouseEvents is on, the window gets no CursorMoved —
-            // poll global cursor and hit-test the same opaque pixels as clicks.
-            let over = self.cursor_hits_pet();
-            let want_ignore = !over;
-            if want_ignore != self.ignore_mouse {
-                self.ignore_mouse = want_ignore;
-                macos::set_ignore_mouse(window, want_ignore);
+            if !self.ignore_mouse {
+                self.ignore_mouse = true;
+                macos::set_ignore_mouse(window, true);
             }
         }
     }
 
+    /// Tight body hit in desktop logical coords (props / transparent canvas ignored).
+    fn hits_pet_body(&self, desk_x: f64, desk_y: f64) -> bool {
+        let dx = desk_x - self.pet.x;
+        let dy = desk_y - self.pet.y;
+        let rx = 52.0 + PET_HIT_PAD as f64;
+        let ry = 44.0 + PET_HIT_PAD as f64;
+        (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
+    }
+
     fn hits_pet_local(&self, lx: f64, ly: f64) -> bool {
-        render::hit_pet_padded(
-            &self.pixels,
-            self.view_w.max(1),
-            self.view_h.max(1),
-            lx,
-            ly,
-            PET_HIT_PAD,
-        )
+        let (wx, wy) = self.window_origin();
+        self.hits_pet_body(wx + lx, wy + ly)
     }
 
     fn window_origin(&self) -> (f64, f64) {
@@ -369,25 +364,118 @@ impl App {
         }
     }
 
-    /// Desktop cursor → window-local hit (same pad as click / context menu).
+    /// Global left/right button edges — required because the drawable window
+    /// always ignores mouse events (see `update_passthrough`).
     #[cfg(target_os = "macos")]
-    fn cursor_hits_pet(&self) -> bool {
+    fn poll_global_input(&mut self) {
+        let buttons = macos::pressed_mouse_buttons();
+        let left = buttons & 1 != 0;
+        let right = buttons & 2 != 0;
+        let prev_left = self.prev_mouse_buttons & 1 != 0;
+        let prev_right = self.prev_mouse_buttons & 2 != 0;
+        self.prev_mouse_buttons = buttons;
+
         let Some((cx, cy)) = macos::cursor_logical_top_left() else {
-            return false;
+            return;
         };
-        let (wx, wy) = self.window_origin();
-        self.hits_pet_local(cx - wx, cy - wy)
+        let over = self.hits_pet_body(cx, cy);
+
+        if right && !prev_right && over {
+            self.show_ctx_menu();
+        }
+
+        if left && !prev_left && over {
+            self.pet.on_press();
+            self.press = Some(PressState {
+                t0: Instant::now(),
+                desk_x: cx,
+                desk_y: cy,
+                dragging: false,
+                petting: false,
+            });
+            self.drag_grab = Some((cx - self.pet.x, cy - self.pet.y));
+            self.next_frame = Instant::now();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+
+        let Some(press) = self.press.as_ref() else {
+            return;
+        };
+        if left {
+            let promote = !press.dragging
+                && !press.petting
+                && ((cx - press.desk_x).powi(2) + (cy - press.desk_y).powi(2)).sqrt() > 8.0;
+            let dragging = press.dragging || promote;
+            if promote {
+                if let Some(p) = self.press.as_mut() {
+                    p.dragging = true;
+                }
+                self.pet.begin_drag();
+            }
+            if dragging {
+                if let Some((gx, gy)) = self.drag_grab {
+                    self.pet.drag_to(cx - gx, cy - gy);
+                    self.sync_window_pos(true);
+                    self.next_frame = Instant::now();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+        } else {
+            let was_drag = press.dragging || self.pet.dragging;
+            let was_pet = press.petting || self.pet.mode == Mode::Pet;
+            self.press = None;
+            self.drag_grab = None;
+            if was_drag {
+                self.pet.end_drag();
+            } else if was_pet {
+                self.pet.end_pet();
+            }
+            self.next_frame = Instant::now();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn poll_global_input(&mut self) {}
 
     fn schedule_wake(&self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        let poll_at = self.last_passthrough + self.passthrough_interval();
+        // While pressing/dragging, poll faster so global cursor tracking stays smooth.
+        let input_iv = if self.press.is_some() || self.pet.dragging {
+            Duration::from_millis(16)
+        } else {
+            self.passthrough_interval()
+        };
+        let poll_at = self.last_passthrough + input_iv;
         let wake_at = if self.next_frame < poll_at {
             self.next_frame
         } else {
             poll_at
         };
         event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at.max(now)));
+    }
+
+    /// Monitor containing desktop-logical `(x, y)`, else primary.
+    fn monitor_at(event_loop: &ActiveEventLoop, x: f64, y: f64) -> Option<winit::monitor::MonitorHandle> {
+        for m in event_loop.available_monitors() {
+            let scale = m.scale_factor().max(0.01);
+            let pos = m.position();
+            let size = m.size();
+            let x0 = pos.x as f64 / scale;
+            let y0 = pos.y as f64 / scale;
+            let x1 = x0 + size.width as f64 / scale;
+            let y1 = y0 + size.height as f64 / scale;
+            if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                return Some(m);
+            }
+        }
+        event_loop.primary_monitor()
     }
 
     /// WebView `#flash`: full-monitor white overlay. Pet window alone is only ~180².
@@ -403,15 +491,15 @@ impl App {
             return;
         }
 
+        let Some(monitor) = Self::monitor_at(event_loop, self.pet.x, self.pet.y)
+            .or_else(|| event_loop.available_monitors().next())
+        else {
+            return;
+        };
+        let size = monitor.size();
+        let pos = monitor.position();
+
         if self.flash_window.is_none() {
-            let monitor = event_loop
-                .primary_monitor()
-                .or_else(|| event_loop.available_monitors().next());
-            let Some(monitor) = monitor else {
-                return;
-            };
-            let size = monitor.size();
-            let pos = monitor.position();
             let attrs = Window::default_attributes()
                 .with_title("摸鱼猫闪光")
                 .with_decorations(false)
@@ -434,6 +522,8 @@ impl App {
         let Some(w) = &self.flash_window else {
             return;
         };
+        let _ = w.request_inner_size(PhysicalSize::new(size.width.max(1), size.height.max(1)));
+        let _ = w.set_outer_position(PhysicalPosition::new(pos.x, pos.y));
         // Match WebView peak (~0.95).
         let alpha = (intensity * 0.95).clamp(0.0, 0.95);
         w.set_visible(true);
@@ -622,19 +712,21 @@ impl ApplicationHandler<UserEvent> for App {
             self.pet.update(dt);
             self.sync_window_pos(false);
             self.update_passthrough();
+            self.poll_global_input();
             self.sync_flash_overlay(event_loop);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
             self.next_frame = now + self.pet.mode.frame_interval();
         } else {
-            // Refresh passthrough between paint frames so wake/click stays responsive.
+            // Keep click-through + global input alive between paint frames.
             self.update_passthrough();
-            // Flash decays every tick path — keep overlay alpha in sync between paints.
+            self.poll_global_input();
             if self.pet.flash > 0.02 {
                 self.sync_flash_overlay(event_loop);
             }
         }
+        self.last_passthrough = Instant::now();
         self.schedule_wake(event_loop);
 
         // Drain menu events (also delivered as UserEvent when proxy works).
@@ -738,8 +830,9 @@ impl ApplicationHandler<UserEvent> for App {
                         press.dragging = true;
                     }
                     self.pet.begin_drag();
-                    let (wx, wy) = self.window_origin();
-                    self.drag_grab = Some((lx - (self.pet.x - wx), ly - (self.pet.y - wy)));
+                    if let Some((dx, dy)) = desk {
+                        self.drag_grab = Some((dx - self.pet.x, dy - self.pet.y));
+                    }
                 }
 
                 if let Some((ox, oy)) = self.drag_grab {
@@ -791,11 +884,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     dragging: false,
                                     petting: false,
                                 });
-                            }
-                            #[cfg(target_os = "macos")]
-                            {
-                                macos::set_ignore_mouse(window, false);
-                                self.ignore_mouse = false;
+                                self.drag_grab = Some((dx - self.pet.x, dy - self.pet.y));
                             }
                             self.next_frame = Instant::now();
                             window.request_redraw();
