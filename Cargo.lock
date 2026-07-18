@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "cat-desk-pet"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

@@ -1,80 +1,13 @@
-//! Phase 2 pet state machine (native-spike).
+//! Pet behaviour state machine.
 //! + cursor: interested / watching / chasing
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Walking,
-    Idle,
-    Sleeping,
-    /// Walk toward the corner bed, then become `InBed`.
-    GoingHome,
-    InBed,
-    Dragged,
-    Dizzy,
-    /// Held/stroked without dragging — hearts face until release.
-    Pet,
-    /// Walk over to idle cursor after long inactivity.
-    Clingy,
-    Interested,
-    Watching,
-    Chasing,
-    Feeding,
-    Playing,
-    BirdWatch,
-    ButterflyNose,
-    Startled,
-    Photo,
-    Gifting,
-}
+mod mode;
+mod rng;
 
-impl Mode {
-    pub fn frame_interval(self) -> Duration {
-        match self {
-            Mode::Sleeping | Mode::InBed => Duration::from_millis(125),
-            Mode::Idle | Mode::Dizzy | Mode::Pet | Mode::Watching | Mode::BirdWatch => {
-                Duration::from_millis(66)
-            }
-            Mode::Walking
-            | Mode::GoingHome
-            | Mode::Clingy
-            | Mode::Interested
-            | Mode::Feeding
-            | Mode::ButterflyNose
-            | Mode::Gifting => Duration::from_millis(40),
-            Mode::Dragged
-            | Mode::Chasing
-            | Mode::Playing
-            | Mode::Startled
-            | Mode::Photo => Duration::from_millis(33),
-        }
-    }
+pub use mode::Mode;
 
-    pub fn is_asleep(self) -> bool {
-        matches!(self, Mode::Sleeping | Mode::InBed)
-    }
-
-    fn cursor_locked(self) -> bool {
-        matches!(
-            self,
-            Mode::Sleeping
-                | Mode::GoingHome
-                | Mode::InBed
-                | Mode::Dragged
-                | Mode::Dizzy
-                | Mode::Pet
-                | Mode::Clingy
-                | Mode::Feeding
-                | Mode::Playing
-                | Mode::ButterflyNose
-                | Mode::Startled
-                | Mode::Photo
-                | Mode::Gifting
-        )
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GiftKind {
@@ -562,18 +495,26 @@ impl Pet {
     pub fn note_cursor(&mut self, pos: Option<(f64, f64)>) {
         self.cursor = pos;
         let Some((x, y)) = pos else {
+            self.prune_cursor_trail();
             return;
         };
-        if let Some(last) = self.cursor_trail.back() {
-            if (last.x - x).abs() < 0.5 && (last.y - y).abs() < 0.5 {
-                return;
-            }
+        let moved = match self.cursor_trail.back() {
+            Some(last) => (last.x - x).abs() >= 0.5 || (last.y - y).abs() >= 0.5,
+            None => true,
+        };
+        if moved {
+            self.cursor_trail.push_back(CursorSample {
+                x,
+                y,
+                t: self.clock,
+            });
         }
-        self.cursor_trail.push_back(CursorSample {
-            x,
-            y,
-            t: self.clock,
-        });
+        // Always prune / recompute — stationary cursor must still decay amt
+        // so Interested / Watching can end.
+        self.prune_cursor_trail();
+    }
+
+    fn prune_cursor_trail(&mut self) {
         while let Some(front) = self.cursor_trail.front() {
             if self.clock - front.t > 1.5 {
                 self.cursor_trail.pop_front();
@@ -597,14 +538,14 @@ impl Pet {
 
     pub fn wake(&mut self) {
         if self.mode.is_asleep() {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
     pub fn go_sleep(&mut self) {
         self.dragging = false;
         self.interrupt_gift();
-        self.enter(Mode::Sleeping);
+        self.transition(Mode::Sleeping);
     }
 
     pub fn go_to_bed(&mut self) {
@@ -622,9 +563,9 @@ impl Pet {
         if (dx * dx + dy * dy).sqrt() < 12.0 {
             self.x = self.home_x;
             self.y = self.home_y;
-            self.enter(Mode::InBed);
+            self.transition(Mode::InBed);
         } else {
-            self.enter(Mode::GoingHome);
+            self.transition(Mode::GoingHome);
             self.mode_until = 12.0;
         }
     }
@@ -656,12 +597,11 @@ impl Pet {
             lingering: false,
         });
         self.gift_cooldown = 180.0 + (fastrand_u64() % 120) as f64;
-        self.mode = Mode::Gifting;
-        self.mode_elapsed = 0.0;
+        // Approach cursor Y band via target_y — do not teleport / permanently
+        // rewrite floor_y (post-gift walking must keep a stable ground).
+        self.target_y = (gy + 40.0).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        self.transition(Mode::Gifting);
         self.mode_until = 15.0;
-        // Walk toward cursor Y band a bit.
-        self.floor_y = (gy + 40.0).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
-        self.y = self.floor_y;
     }
 
     fn interrupt_gift(&mut self) {
@@ -752,7 +692,7 @@ impl Pet {
         self.laser_trail.clear();
         if self.mode == Mode::Playing {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
         }
     }
 
@@ -884,7 +824,7 @@ impl Pet {
 
     pub fn end_pet(&mut self) {
         if self.mode == Mode::Pet {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
@@ -902,11 +842,8 @@ impl Pet {
         let jitter_y = 40.0 + (fastrand_u64() % 40) as f64;
         self.target_x = (cx + jitter_x).clamp(40.0, self.screen_w - 40.0);
         self.target_y = (cy + jitter_y).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
-        self.clingy_arrived = false;
         self.last_clingy_t = self.clock;
-        self.mode = Mode::Clingy;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 9.0;
+        self.transition(Mode::Clingy);
     }
 
     pub fn end_drag(&mut self) {
@@ -917,7 +854,7 @@ impl Pet {
             self.mode_elapsed = 0.0;
             self.dizzy_t = 0.0;
         } else {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
@@ -965,7 +902,7 @@ impl Pet {
             Mode::Sleeping => self.tick_sleeping(dt),
             Mode::GoingHome => self.tick_going_home(dt),
             Mode::InBed => self.tick_in_bed(dt),
-            Mode::Dragged => self.enter_idle(),
+            Mode::Dragged => self.transition(Mode::Idle),
             Mode::Pet => {
                 // Held; release from App ends it. Soft bob + tail phase while petted.
                 self.walk_phase = (self.walk_phase + dt * 6.0) % std::f64::consts::TAU;
@@ -976,7 +913,7 @@ impl Pet {
                 self.dizzy_t += dt;
                 if self.mode_elapsed > 0.9 {
                     self.pick_new_target();
-                    self.enter(Mode::Walking);
+                    self.transition(Mode::Walking);
                 }
             }
             Mode::Interested => self.tick_interested(dt),
@@ -989,13 +926,13 @@ impl Pet {
             Mode::Gifting => self.tick_gifting(dt),
             Mode::Startled => {
                 if self.mode_elapsed > 0.7 {
-                    self.enter_idle();
+                    self.transition(Mode::Idle);
                 }
             }
             Mode::Photo => {
                 self.photo_t += dt;
                 if self.mode_elapsed > self.mode_until {
-                    self.enter_idle();
+                    self.transition(Mode::Idle);
                 }
             }
         }
@@ -1021,24 +958,25 @@ impl Pet {
     fn tick_clingy(&mut self, dt: f64) {
         if self.mode_elapsed > self.mode_until {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
+        // Path on floor_y (ground); bob is applied after — never write bob into floor.
         let dx = self.target_x - self.x;
-        let dy = self.target_y - self.y;
+        let dy = self.target_y - self.floor_y;
         let dist = (dx * dx + dy * dy).sqrt();
         // Walk for the first ~4s of the 9s window (mirror WebView modeUntil-5000).
         if dist > 8.0 && self.mode_elapsed < self.mode_until - 5.0 {
             let speed = 60.0 * self.species.speed();
             let step = (speed * dt).min(dist);
             self.x += dx / dist * step;
-            self.y += dy / dist * step;
-            self.floor_y = self.y.clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+            self.floor_y = (self.floor_y + dy / dist * step)
+                .clamp(self.screen_h * 0.55, self.screen_h * 0.85);
             if dx.abs() > 2.0 {
                 self.facing = if dx > 0.0 { 1.0 } else { -1.0 };
             }
             self.walk_phase = (self.walk_phase + dt * 9.0) % std::f64::consts::TAU;
-            self.y += self.walk_phase.sin() * 2.0;
+            self.y = self.floor_y + self.walk_phase.sin() * 2.0;
         } else {
             self.clingy_arrived = true;
             self.y = self.floor_y + (self.mode_elapsed * 1.8).sin() * 1.5;
@@ -1094,30 +1032,30 @@ impl Pet {
         match self.mode {
             Mode::Walking | Mode::Idle => {
                 if active && dist < 280.0 {
-                    self.enter_interested();
+                    self.transition(Mode::Interested);
                 } else if fast && dist >= 280.0 && dist < 900.0 {
-                    self.enter_watching();
+                    self.transition(Mode::Watching);
                 }
             }
             Mode::Interested => {
                 // escalate: close + very active → chase
                 if fast && dist < 320.0 && self.mode_elapsed > 0.4 {
-                    self.enter_chasing();
+                    self.transition(Mode::Chasing);
                 } else if !active || dist > 380.0 || self.mode_elapsed > self.mode_until {
                     self.pick_new_target();
-                    self.enter(Mode::Walking);
+                    self.transition(Mode::Walking);
                 }
             }
             Mode::Watching => {
                 if self.mode_elapsed > self.mode_until || (dist < 280.0 && active) {
                     // hand off — next tick may go interested
                     self.pick_new_target();
-                    self.enter(Mode::Walking);
+                    self.transition(Mode::Walking);
                 }
             }
             Mode::Chasing => {
                 if self.mode_elapsed > self.mode_until {
-                    self.enter_idle();
+                    self.transition(Mode::Idle);
                 }
             }
             _ => {}
@@ -1126,7 +1064,7 @@ impl Pet {
 
     fn tick_interested(&mut self, dt: f64) {
         let Some((cx, cy)) = self.cursor else {
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
         self.interested_jitter += dt * 1.5;
@@ -1156,7 +1094,7 @@ impl Pet {
         self.chase_t += dt;
         self.walk_phase = (self.walk_phase + dt * 14.0) % (std::f64::consts::TAU);
         let Some((cx, cy)) = self.cursor else {
-            self.enter_idle();
+            self.transition(Mode::Idle);
             return;
         };
         // sprint toward cursor with a little lead
@@ -1172,20 +1110,20 @@ impl Pet {
         }
         // catch: close enough → brief idle celebration then continue or stop
         if d < 48.0 && self.mode_elapsed > 0.6 {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
     fn tick_feeding(&mut self, dt: f64) {
         let Some(mut feed) = self.feed.take() else {
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
         feed.age += dt;
         if self.mode_elapsed > self.mode_until || feed.age > 25.0 {
             self.feed = None;
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
 
@@ -1201,7 +1139,7 @@ impl Pet {
                 self.eat_anim_t = *t;
                 if *t > 1.4 {
                     self.feed = None;
-                    self.enter_idle();
+                    self.transition(Mode::Idle);
                     return;
                 }
             }
@@ -1222,7 +1160,7 @@ impl Pet {
         let Some(toy) = self.toy.as_ref() else {
             self.laser_trail.clear();
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
         let cursor_toy = toy.kind.is_cursor_driven();
@@ -1232,7 +1170,7 @@ impl Pet {
             self.toy = None;
             self.laser_trail.clear();
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
 
@@ -1350,7 +1288,7 @@ impl Pet {
             self.laser_trail.clear();
             if self.mode == Mode::Playing {
                 self.pick_new_target();
-                self.enter(Mode::Walking);
+                self.transition(Mode::Walking);
             }
         }
     }
@@ -1358,15 +1296,15 @@ impl Pet {
     fn tick_gifting(&mut self, dt: f64) {
         let Some(mut g) = self.gift.take() else {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
 
         if !g.dropped {
             let tx = self.target_x;
-            let ty = self.floor_y;
+            let ty = self.target_y;
             let dx = tx - self.x;
-            let dy = ty - self.y;
+            let dy = ty - self.floor_y;
             let dist = (dx * dx + dy * dy).sqrt();
             if dist < 22.0 || self.mode_elapsed > self.mode_until {
                 // Arrive / give up — put present down.
@@ -1377,6 +1315,7 @@ impl Pet {
                 g.y = self.y + 18.0;
                 self.mode_until = 2.5;
                 self.mode_elapsed = 0.0;
+                self.floor_y = self.target_y;
                 self.y = self.floor_y;
             } else {
                 self.move_toward(tx, ty, 55.0 * self.speed_mul() * dt);
@@ -1386,7 +1325,8 @@ impl Pet {
                 self.walk_phase = (self.walk_phase + dt * 10.0) % (std::f64::consts::TAU);
                 let dir = if self.facing >= 0.0 { 1.0 } else { -1.0 };
                 g.x = self.x + dir * 20.0;
-                g.y = self.y - 4.0 + self.walk_phase.sin() * 2.0;
+                g.y = self.floor_y - 4.0 + self.walk_phase.sin() * 2.0;
+                self.y = self.floor_y + self.walk_phase.sin() * 2.0;
             }
             self.gift = Some(g);
             return;
@@ -1399,7 +1339,7 @@ impl Pet {
             g.drop_age = 0.0; // linger clock starts when pet walks away
             self.gift = Some(g);
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
         self.gift = Some(g);
@@ -1441,7 +1381,7 @@ impl Pet {
         }
         if self.mode_elapsed > self.mode_until || self.flyer.is_none() {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
         }
         let _ = dt;
     }
@@ -1476,7 +1416,7 @@ impl Pet {
                     // gone
                     if self.mode == Mode::BirdWatch {
                         self.pick_new_target();
-                        self.enter(Mode::Walking);
+                        self.transition(Mode::Walking);
                     }
                     return;
                 }
@@ -1667,17 +1607,18 @@ impl Pet {
     }
 
     fn move_toward(&mut self, tx: f64, ty: f64, step: f64) {
+        // Step ground along floor_y so walk bob never accumulates into the floor.
         let dx = tx - self.x;
-        let dy = ty - self.y;
+        let dy = ty - self.floor_y;
         let d = (dx * dx + dy * dy).sqrt();
         if d < 4.0 || step <= 0.0 {
             return;
         }
         let k = (step / d).min(1.0);
         self.x += dx * k;
-        self.y += dy * k;
+        self.floor_y = (self.floor_y + dy * k).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        self.y = self.floor_y;
         self.clamp_pos();
-        // gently update floor so after chase we don't snap
         self.floor_y = self.y.clamp(self.screen_h * 0.55, self.screen_h * 0.85);
     }
 
@@ -1740,14 +1681,14 @@ impl Pet {
         if (self.x - self.target_x).abs() < 4.0 {
             self.pick_new_target();
             if self.mode_elapsed > 3.5 && fastrand_chance(0.4) {
-                self.enter_idle();
+                self.transition(Mode::Idle);
             }
         }
         if self.mode_elapsed > 16.0 && fastrand_chance(0.02) {
             if fastrand_chance(0.45) {
-                self.enter(Mode::InBed);
+                self.transition(Mode::InBed);
             } else {
-                self.enter(Mode::Sleeping);
+                self.transition(Mode::Sleeping);
             }
         }
     }
@@ -1769,13 +1710,13 @@ impl Pet {
                 self.pick_idle_action();
             } else if fastrand_chance(0.35) {
                 if fastrand_chance(0.5) {
-                    self.enter(Mode::Sleeping);
+                    self.transition(Mode::Sleeping);
                 } else {
-                    self.enter(Mode::InBed);
+                    self.transition(Mode::InBed);
                 }
             } else {
                 self.pick_new_target();
-                self.enter(Mode::Walking);
+                self.transition(Mode::Walking);
             }
         }
     }
@@ -1784,69 +1725,43 @@ impl Pet {
         self.sleep_t += dt;
         self.y = self.floor_y + 8.0 + (self.sleep_t * 0.8).sin() * 0.8;
         if self.mode_elapsed > 14.0 && fastrand_chance(0.02) {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
     fn tick_going_home(&mut self, dt: f64) {
         let dx = self.home_x - self.x;
-        let dy = self.home_y - self.y;
+        let dy = self.home_y - self.floor_y;
         let dist = (dx * dx + dy * dy).sqrt();
         if dist < 8.0 || self.mode_elapsed > self.mode_until {
             self.x = self.home_x;
             self.y = self.home_y;
             self.floor_y = self.home_y;
-            self.enter(Mode::InBed);
+            self.transition(Mode::InBed);
             return;
         }
         let speed = 55.0 * self.species.speed(); // ~px/s
         let step = (speed * dt).min(dist);
         self.x += dx / dist * step;
-        self.y += dy / dist * step;
+        self.floor_y += dy / dist * step;
         if dx.abs() > 2.0 {
             self.facing = if dx > 0.0 { 1.0 } else { -1.0 };
         }
         self.walk_phase = (self.walk_phase + dt * 9.0) % std::f64::consts::TAU;
-        // Bob relative to the lerp path (y already stepped toward home).
-        self.y += self.walk_phase.sin() * 2.0;
+        // Align with Walking: bob on top of stable ground, never accumulate into floor.
+        self.y = self.floor_y + self.walk_phase.sin() * 2.0;
     }
 
     fn tick_in_bed(&mut self, dt: f64) {
         self.sleep_t += dt;
         self.y = self.floor_y + 4.0 + (self.sleep_t * 0.7).sin() * 0.6;
         if self.mode_elapsed > 22.0 && fastrand_chance(0.01) {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
-    fn enter_idle(&mut self) {
-        self.mode = Mode::Idle;
-        self.mode_elapsed = 0.0;
-        self.idle_t = 0.0;
-        self.pick_idle_action();
-    }
-
-    fn enter_interested(&mut self) {
-        self.mode = Mode::Interested;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 3.0 + (fastrand_u64() % 2500) as f64 / 1000.0;
-        self.interested_jitter = (fastrand_u64() % 628) as f64 / 100.0;
-    }
-
-    fn enter_watching(&mut self) {
-        self.mode = Mode::Watching;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 0.9 + (fastrand_u64() % 900) as f64 / 1000.0;
-    }
-
-    fn enter_chasing(&mut self) {
-        self.mode = Mode::Chasing;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 2.2 + (fastrand_u64() % 1800) as f64 / 1000.0;
-        self.chase_t = 0.0;
-    }
-
-    fn enter(&mut self, mode: Mode) {
+    /// Single mode-switch entry: resets timers; callers may override `mode_until`.
+    fn transition(&mut self, mode: Mode) {
         self.mode = mode;
         self.mode_elapsed = 0.0;
         match mode {
@@ -1864,14 +1779,23 @@ impl Pet {
                 self.dizzy_t = 0.0;
             }
             Mode::Interested => {
-                self.mode_until = 4.0;
+                self.mode_until = 3.0 + (fastrand_u64() % 2500) as f64 / 1000.0;
+                self.interested_jitter = (fastrand_u64() % 628) as f64 / 100.0;
             }
             Mode::Watching => {
-                self.mode_until = 1.2;
+                self.mode_until = 0.9 + (fastrand_u64() % 900) as f64 / 1000.0;
             }
             Mode::Chasing => {
-                self.mode_until = 3.0;
+                self.mode_until = 2.2 + (fastrand_u64() % 1800) as f64 / 1000.0;
                 self.chase_t = 0.0;
+            }
+            Mode::Clingy => {
+                self.clingy_arrived = false;
+                self.mode_until = 9.0;
+            }
+            Mode::Pet => {}
+            Mode::Photo => {
+                self.photo_t = 0.0;
             }
             _ => {}
         }
@@ -1897,26 +1821,139 @@ impl Pet {
         let margin = Self::SIZE;
         let lo = margin;
         let hi = (self.screen_w - margin).max(lo + 1.0);
-        let t = ((self.x * 12.9898 + self.y * 78.233).sin() * 43758.5453).fract().abs();
-        self.target_x = lo + t * (hi - lo);
+        const MIN_DIST: f64 = 48.0;
+        for _ in 0..12 {
+            let t = (fastrand_u64() as f64) / (u64::MAX as f64);
+            let tx = lo + t * (hi - lo);
+            if (tx - self.x).abs() >= MIN_DIST {
+                self.target_x = tx;
+                return;
+            }
+        }
+        // Fallback: flip to the far side so we never "arrive" immediately.
+        self.target_x = if self.x < (lo + hi) * 0.5 { hi } else { lo };
     }
 }
 
+
 fn fastrand_u64() -> u64 {
-    use std::cell::Cell;
-    thread_local! {
-        static S: Cell<u64> = Cell::new(0xC0FFEE_u64);
-    }
-    S.with(|s| {
-        let mut x = s.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        s.set(x);
-        x
-    })
+    rng::next_u64()
 }
 
 fn fastrand_chance(p: f64) -> bool {
     (fastrand_u64() as f64) / (u64::MAX as f64) < p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_still_decays_move_amt() {
+        rng::seed(1);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.clock = 0.0;
+        pet.note_cursor(Some((100.0, 100.0)));
+        pet.clock = 0.05;
+        pet.note_cursor(Some((250.0, 100.0)));
+        assert!(
+            pet.cursor_move_amt > 60.0,
+            "expected motion, got {}",
+            pet.cursor_move_amt
+        );
+        // Hold still past the 1.5s trail window — amt must decay to ~0.
+        for i in 0..20 {
+            pet.clock = 0.05 + i as f64 * 0.2;
+            pet.note_cursor(Some((250.0, 100.0)));
+        }
+        assert!(
+            pet.cursor_move_amt < 1.0,
+            "stationary cursor should decay amt, got {}",
+            pet.cursor_move_amt
+        );
+    }
+
+    #[test]
+    fn going_home_reaches_home_x() {
+        rng::seed(2);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.x = pet.home_x - 180.0;
+        pet.floor_y = pet.home_y;
+        pet.y = pet.floor_y;
+        pet.go_to_bed();
+        assert_eq!(pet.mode, Mode::GoingHome);
+        for _ in 0..900 {
+            pet.update(1.0 / 60.0);
+            if pet.mode == Mode::InBed {
+                break;
+            }
+        }
+        assert_eq!(pet.mode, Mode::InBed);
+        assert!(
+            (pet.x - pet.home_x).abs() < 1.0,
+            "x={} home={}",
+            pet.x,
+            pet.home_x
+        );
+        assert!((pet.floor_y - pet.home_y).abs() < 1.0);
+    }
+
+    #[test]
+    fn gifting_does_not_teleport_floor_y() {
+        rng::seed(3);
+        let mut pet = Pet::new(1440.0, 900.0);
+        let floor0 = pet.floor_y;
+        // High cursor used to rewrite floor_y immediately in start_gifting.
+        pet.cursor = Some((800.0, 80.0));
+        pet.start_gifting();
+        assert_eq!(pet.mode, Mode::Gifting);
+        assert!(
+            (pet.floor_y - floor0).abs() < 0.01,
+            "floor teleported from {floor0} to {}",
+            pet.floor_y
+        );
+    }
+
+    #[test]
+    fn clingy_bob_does_not_drift_floor() {
+        rng::seed(4);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.cursor = Some((pet.x + 400.0, pet.floor_y));
+        pet.start_clingy();
+        pet.target_y = pet.floor_y; // horizontal approach
+        let floor0 = pet.floor_y;
+        for _ in 0..90 {
+            pet.update(1.0 / 60.0);
+            if matches!(pet.mode, Mode::Clingy) && !pet.clingy_arrived {
+                // Bob lives in y, not floor.
+                assert!(
+                    (pet.y - pet.floor_y).abs() <= 2.01,
+                    "y={} floor={}",
+                    pet.y,
+                    pet.floor_y
+                );
+            }
+        }
+        assert!(
+            (pet.floor_y - floor0).abs() < 0.5,
+            "floor drifted by {}",
+            pet.floor_y - floor0
+        );
+    }
+
+    #[test]
+    fn pick_new_target_rejects_near() {
+        rng::seed(5);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.x = 400.0;
+        for _ in 0..30 {
+            pet.pick_new_target();
+            assert!(
+                (pet.target_x - pet.x).abs() >= 48.0 - 1e-6,
+                "target {} too close to x={}",
+                pet.target_x,
+                pet.x
+            );
+        }
+    }
 }

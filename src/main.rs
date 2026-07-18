@@ -1,10 +1,10 @@
-//! Cat Desk Pet — native small-window pet (issue #2 Phase 3). No WebView.
+//! Cat Desk Pet — native small-window pet. No WebView.
 //!
 //! From repo root:
 //!   npm run dev
 //!   npm run build
 //! Or:
-//!   cargo run --release --manifest-path native-spike/Cargo.toml
+//!   cargo run --release
 
 mod pet;
 mod render;
@@ -39,6 +39,24 @@ enum UserEvent {
     MenuEvent(tray_icon::menu::MenuEvent),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum MenuCommand {
+    Quit,
+    Toggle,
+    Sleep,
+    Bed,
+    Feed,
+    Toy(ToyKind),
+    CancelToy,
+    Bird,
+    Butterfly,
+    Photo,
+    Gift,
+    Clingy,
+    Coat(CoatColor),
+    Species(Species),
+}
+
 /// Left-button press before we know drag vs pet (mirrors WebView `state.press`).
 struct PressState {
     t0: Instant,
@@ -68,25 +86,7 @@ struct App {
     ctx_menu: Option<Menu>,
     _submenus: Option<Vec<Submenu>>,
     _menu_items: Option<Vec<MenuItem>>,
-    quit_id: Option<tray_icon::menu::MenuId>,
-    toggle_id: Option<tray_icon::menu::MenuId>,
-    sleep_id: Option<tray_icon::menu::MenuId>,
-    bed_id: Option<tray_icon::menu::MenuId>,
-    feed_id: Option<tray_icon::menu::MenuId>,
-    yarn_id: Option<tray_icon::menu::MenuId>,
-    ball_id: Option<tray_icon::menu::MenuId>,
-    paper_id: Option<tray_icon::menu::MenuId>,
-    mouse_id: Option<tray_icon::menu::MenuId>,
-    laser_id: Option<tray_icon::menu::MenuId>,
-    wand_id: Option<tray_icon::menu::MenuId>,
-    cancel_toy_id: Option<tray_icon::menu::MenuId>,
-    bird_id: Option<tray_icon::menu::MenuId>,
-    butterfly_id: Option<tray_icon::menu::MenuId>,
-    photo_id: Option<tray_icon::menu::MenuId>,
-    gift_id: Option<tray_icon::menu::MenuId>,
-    clingy_id: Option<tray_icon::menu::MenuId>,
-    color_ids: Vec<(tray_icon::menu::MenuId, CoatColor)>,
-    species_ids: Vec<(tray_icon::menu::MenuId, Species)>,
+    menu_cmds: Vec<(tray_icon::menu::MenuId, MenuCommand)>,
     hidden: bool,
     cursor_local: Option<(f64, f64)>,
     ignore_mouse: bool,
@@ -125,25 +125,7 @@ impl App {
             ctx_menu: None,
             _submenus: None,
             _menu_items: None,
-            quit_id: None,
-            toggle_id: None,
-            sleep_id: None,
-            bed_id: None,
-            feed_id: None,
-            yarn_id: None,
-            ball_id: None,
-            paper_id: None,
-            mouse_id: None,
-            laser_id: None,
-            wand_id: None,
-            cancel_toy_id: None,
-            bird_id: None,
-            butterfly_id: None,
-            photo_id: None,
-            gift_id: None,
-            clingy_id: None,
-            color_ids: Vec::new(),
-            species_ids: Vec::new(),
+            menu_cmds: Vec::new(),
             hidden: false,
             cursor_local: None,
             ignore_mouse: true,
@@ -340,20 +322,41 @@ impl App {
                 return;
             }
             // When ignoresMouseEvents is on, the window gets no CursorMoved —
-            // poll global cursor and hit-test against the pet's desktop ellipse.
-            let over = macos::cursor_logical_top_left()
-                .map(|(cx, cy)| {
-                    let dx = cx - self.pet.x;
-                    let dy = cy - self.pet.y;
-                    (dx * dx) / (52.0 * 52.0) + (dy * dy) / (44.0 * 44.0) <= 1.0
-                })
-                .unwrap_or(false);
+            // poll global cursor and hit-test the same opaque pixels as clicks
+            // (with a small pad so the edge stays grab-able).
+            let over = self.cursor_hits_pet(4);
             let want_ignore = !over;
             if want_ignore != self.ignore_mouse {
                 self.ignore_mouse = want_ignore;
                 macos::set_ignore_mouse(window, want_ignore);
             }
         }
+    }
+
+    /// Desktop cursor → window-local hit, shared by click and passthrough.
+    #[cfg(target_os = "macos")]
+    fn cursor_hits_pet(&self, pad: i32) -> bool {
+        let Some((cx, cy)) = macos::cursor_logical_top_left() else {
+            return false;
+        };
+        let (wx, wy) = match self.last_win_pos {
+            Some(p) => p,
+            None => self.desired_win_pos(),
+        };
+        let lx = cx - wx;
+        let ly = cy - wy;
+        render::hit_pet_padded(&self.pixels, WIN, WIN, lx, ly, pad)
+    }
+
+    fn schedule_wake(&self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let poll_at = self.last_passthrough + self.passthrough_interval();
+        let wake_at = if self.next_frame < poll_at {
+            self.next_frame
+        } else {
+            poll_at
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at.max(now)));
     }
 }
 
@@ -367,13 +370,16 @@ impl ApplicationHandler<UserEvent> for App {
             let menu = Menu::new();
             let mut items: Vec<MenuItem> = Vec::new();
             let mut submenus: Vec<Submenu> = Vec::new();
+            let mut menu_cmds: Vec<(tray_icon::menu::MenuId, MenuCommand)> = Vec::new();
+            let mut bind = |item: &MenuItem, cmd: MenuCommand| {
+                menu_cmds.push((item.id().clone(), cmd));
+            };
 
             // --- 🐾 动物 ---
-            self.species_ids.clear();
             let mut species_items: Vec<MenuItem> = Vec::new();
             for sp in Species::all() {
                 let item = MenuItem::new(sp.label(), true, None);
-                self.species_ids.push((item.id().clone(), *sp));
+                bind(&item, MenuCommand::Species(*sp));
                 species_items.push(item);
             }
             let species_refs: Vec<&dyn IsMenuItem> = species_items
@@ -384,11 +390,10 @@ impl ApplicationHandler<UserEvent> for App {
                 Submenu::with_items("🐾 动物", true, &species_refs).expect("species submenu");
 
             // --- 🎨 毛色 ---
-            self.color_ids.clear();
             let mut color_items: Vec<MenuItem> = Vec::new();
             for coat in CoatColor::all() {
                 let item = MenuItem::new(coat.label(), true, None);
-                self.color_ids.push((item.id().clone(), *coat));
+                bind(&item, MenuCommand::Coat(*coat));
                 color_items.push(item);
             }
             let color_refs: Vec<&dyn IsMenuItem> =
@@ -401,10 +406,10 @@ impl ApplicationHandler<UserEvent> for App {
             let sleep = MenuItem::new("💤 让她睡一下", true, None);
             let bed = MenuItem::new("🏠 回窝睡觉", true, None);
             let photo = MenuItem::new("📸 拍照模式", true, None);
-            self.feed_id = Some(feed.id().clone());
-            self.sleep_id = Some(sleep.id().clone());
-            self.bed_id = Some(bed.id().clone());
-            self.photo_id = Some(photo.id().clone());
+            bind(&feed, MenuCommand::Feed);
+            bind(&sleep, MenuCommand::Sleep);
+            bind(&bed, MenuCommand::Bed);
+            bind(&photo, MenuCommand::Photo);
             let interact_menu = Submenu::with_items(
                 "🎮 互动",
                 true,
@@ -425,13 +430,13 @@ impl ApplicationHandler<UserEvent> for App {
             let laser = MenuItem::new("🔴 激光笔", true, None);
             let wand = MenuItem::new("🪶 逗猫棒", true, None);
             let cancel_toy = MenuItem::new("❌ 收起玩具", true, None);
-            self.yarn_id = Some(yarn.id().clone());
-            self.ball_id = Some(ball.id().clone());
-            self.paper_id = Some(paper.id().clone());
-            self.mouse_id = Some(mouse.id().clone());
-            self.laser_id = Some(laser.id().clone());
-            self.wand_id = Some(wand.id().clone());
-            self.cancel_toy_id = Some(cancel_toy.id().clone());
+            bind(&yarn, MenuCommand::Toy(ToyKind::Yarn));
+            bind(&ball, MenuCommand::Toy(ToyKind::Ball));
+            bind(&paper, MenuCommand::Toy(ToyKind::Paper));
+            bind(&mouse, MenuCommand::Toy(ToyKind::Mouse));
+            bind(&laser, MenuCommand::Toy(ToyKind::Laser));
+            bind(&wand, MenuCommand::Toy(ToyKind::Wand));
+            bind(&cancel_toy, MenuCommand::CancelToy);
             let toy_menu = Submenu::with_items(
                 "🧸 玩具",
                 true,
@@ -447,17 +452,17 @@ impl ApplicationHandler<UserEvent> for App {
             )
             .expect("toy submenu");
 
-            // --- ✨ 更多（spike 额外；WebView 右键无此项）---
+            // --- ✨ 更多 ---
             let toggle = MenuItem::new("隐藏 / 显示宠物", true, None);
             let clingy = MenuItem::new("💕 过来撒娇", true, None);
             let gift = MenuItem::new("🎁 送你礼物", true, None);
             let bird = MenuItem::new("🐦 小鸟飞过", true, None);
             let butterfly = MenuItem::new("🦋 蝴蝶落鼻", true, None);
-            self.toggle_id = Some(toggle.id().clone());
-            self.clingy_id = Some(clingy.id().clone());
-            self.gift_id = Some(gift.id().clone());
-            self.bird_id = Some(bird.id().clone());
-            self.butterfly_id = Some(butterfly.id().clone());
+            bind(&toggle, MenuCommand::Toggle);
+            bind(&clingy, MenuCommand::Clingy);
+            bind(&gift, MenuCommand::Gift);
+            bind(&bird, MenuCommand::Bird);
+            bind(&butterfly, MenuCommand::Butterfly);
             let more_menu = Submenu::with_items(
                 "✨ 更多",
                 true,
@@ -472,7 +477,7 @@ impl ApplicationHandler<UserEvent> for App {
             .expect("more submenu");
 
             let quit = MenuItem::new("退出", true, None);
-            self.quit_id = Some(quit.id().clone());
+            bind(&quit, MenuCommand::Quit);
             let sep = PredefinedMenuItem::separator();
 
             let _ = menu.append(&species_menu);
@@ -508,6 +513,7 @@ impl ApplicationHandler<UserEvent> for App {
             submenus.push(toy_menu);
             submenus.push(more_menu);
 
+            self.menu_cmds = menu_cmds;
             self._menu_items = Some(items);
             self._submenus = Some(submenus);
             self.ctx_menu = Some(menu.clone());
@@ -539,14 +545,7 @@ impl ApplicationHandler<UserEvent> for App {
             // Refresh passthrough between paint frames so wake/click stays responsive.
             self.update_passthrough();
         }
-        // Wake for the sooner of next paint or next passthrough poll.
-        let poll_at = self.last_passthrough + self.passthrough_interval();
-        let wake_at = if self.next_frame < poll_at {
-            self.next_frame
-        } else {
-            poll_at
-        };
-        event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at.max(now)));
+        self.schedule_wake(event_loop);
 
         // Drain menu events (also delivered as UserEvent when proxy works).
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
@@ -742,112 +741,80 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        // Must match new_events: sleeping frame interval is long; passthrough
+        // still needs to wake so click-to-wake stays responsive.
+        self.schedule_wake(event_loop);
     }
 }
 
 impl App {
     fn handle_menu(&mut self, ev: &MenuEvent, event_loop: &ActiveEventLoop) {
-        if Some(&ev.id) == self.quit_id.as_ref() {
-            event_loop.exit();
+        let Some(cmd) = self
+            .menu_cmds
+            .iter()
+            .find(|(id, _)| id == &ev.id)
+            .map(|(_, c)| *c)
+        else {
             return;
-        }
-        if Some(&ev.id) == self.toggle_id.as_ref() {
-            self.set_pet_visible(self.hidden);
-            return;
-        }
-        for (id, sp) in &self.species_ids {
-            if &ev.id == id {
-                let sp = *sp;
+        };
+        match cmd {
+            MenuCommand::Quit => {
+                event_loop.exit();
+            }
+            MenuCommand::Toggle => {
+                self.set_pet_visible(self.hidden);
+            }
+            MenuCommand::Species(sp) => {
                 self.pet.set_species(sp);
                 self.poke();
-                return;
             }
-        }
-        for (id, coat) in &self.color_ids {
-            if &ev.id == id {
-                let coat = *coat;
+            MenuCommand::Coat(coat) => {
                 self.pet.set_coat(coat);
                 self.poke();
-                return;
             }
-        }
-        if Some(&ev.id) == self.feed_id.as_ref() {
-            self.pet.spawn_feed();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.yarn_id.as_ref() {
-            self.pet.spawn_toy(ToyKind::Yarn);
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.ball_id.as_ref() {
-            self.pet.spawn_toy(ToyKind::Ball);
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.paper_id.as_ref() {
-            self.pet.spawn_toy(ToyKind::Paper);
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.mouse_id.as_ref() {
-            self.pet.spawn_toy(ToyKind::Mouse);
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.laser_id.as_ref() {
-            self.pet.spawn_toy(ToyKind::Laser);
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.wand_id.as_ref() {
-            self.pet.spawn_toy(ToyKind::Wand);
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.cancel_toy_id.as_ref() {
-            self.pet.cancel_toy();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.bird_id.as_ref() {
-            self.pet.spawn_bird_flyby();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.butterfly_id.as_ref() {
-            self.pet.spawn_nose_butterfly();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.photo_id.as_ref() {
-            self.pet.take_photo();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.clingy_id.as_ref() {
-            self.feed_cursor();
-            self.pet.start_clingy();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.gift_id.as_ref() {
-            self.pet.start_gifting();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.sleep_id.as_ref() {
-            self.pet.force_scene = None;
-            self.pet.go_sleep();
-            self.poke();
-            return;
-        }
-        if Some(&ev.id) == self.bed_id.as_ref() {
-            self.pet.force_scene = None;
-            self.pet.go_to_bed();
-            self.poke();
+            MenuCommand::Feed => {
+                self.pet.spawn_feed();
+                self.poke();
+            }
+            MenuCommand::Toy(kind) => {
+                self.pet.spawn_toy(kind);
+                self.poke();
+            }
+            MenuCommand::CancelToy => {
+                self.pet.cancel_toy();
+                self.poke();
+            }
+            MenuCommand::Bird => {
+                self.pet.spawn_bird_flyby();
+                self.poke();
+            }
+            MenuCommand::Butterfly => {
+                self.pet.spawn_nose_butterfly();
+                self.poke();
+            }
+            MenuCommand::Photo => {
+                self.pet.take_photo();
+                self.poke();
+            }
+            MenuCommand::Clingy => {
+                self.feed_cursor();
+                self.pet.start_clingy();
+                self.poke();
+            }
+            MenuCommand::Gift => {
+                self.pet.start_gifting();
+                self.poke();
+            }
+            MenuCommand::Sleep => {
+                self.pet.force_scene = None;
+                self.pet.go_sleep();
+                self.poke();
+            }
+            MenuCommand::Bed => {
+                self.pet.force_scene = None;
+                self.pet.go_to_bed();
+                self.poke();
+            }
         }
     }
 
@@ -999,7 +966,7 @@ fn main() {
             ForceScene::Idle => Mode::Idle,
             ForceScene::Sleeping => Mode::Sleeping,
         };
-        eprintln!("native-spike: force scene = {scene:?}");
+        eprintln!("cat-desk-pet: force scene = {scene:?}");
     }
 
     // Seed control flow so WaitUntil fires.

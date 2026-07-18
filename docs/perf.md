@@ -1,11 +1,10 @@
-# Phase 1 Spike — 原生小窗（issue #2）
+# 性能基线 — 原生小窗（v2）
 
-独立 crate：``。**无 WebView**；小窗 (~180×180) + CPU 精灵绘制（softbuffer）+ 走路/闲置/睡觉 + 拖拽唤醒 + 点击穿透 + 托盘退出。
+本仓库默认入口即为原生 `cat-desk-pet`（**无 WebView**）：小窗 (~180×180) + SVG/CPU 精灵 + 走路/闲置/睡觉 + 拖拽唤醒 + 点击穿透 + 托盘退出。
 
 ## 运行
 
 ```bash
-cd .
 cargo run --release
 # 锁定姿态（测 CPU 用）
 cargo run --release -- --mode sleeping   # sleeping | idle | walking
@@ -32,7 +31,7 @@ cargo run --release -- --mode sleeping   # sleeping | idle | walking
 
 warm 5s + 采样 30s。
 
-#### native-spike v2
+#### native v2
 
 | 场景 | avg %CPU | min–max |
 |------|---------:|---------|
@@ -59,9 +58,9 @@ warm 5s + 采样 30s。
 **Go。** 清醒态（walking）相对 v0.1.0+WebKit **超过约 50% 降幅门槛**（实测 ≈ −68%）。  
 可以进入 Phase 2（行为迁移）。
 
-## Phase 2 进度（native-spike）
+## Phase 2 进度（行为迁移，已完成）
 
-按使用频率迁移，WebView 主路径暂保留。
+行为已迁入原生状态机；旧 WebView 对照仓见 `vvphp/desktop-cat`。
 
 | 块 | 状态 |
 |---|---|
@@ -79,13 +78,12 @@ warm 5s + 采样 30s。
 | 送礼（`gifting`） | ✅ 托盘/更多 + 偶尔自发；落叶/花/鼠/糖；放下后停留再淡出 |
 | 菜单对齐（托盘 + 右键） | ✅ 结构对齐 WebView：🐾动物 / 🎨毛色 / 🎮互动 / 🧸玩具；右键点宠物弹出；纸团/假老鼠已补 |
 
-## Phase 3 — 正式壳（已切默认）
+## Phase 3 — 正式壳（当前默认）
 
 | 项 | 状态 |
 |---|---|
 | 默认入口 `npm run dev` / `npm run build` → 原生 `cat-desk-pet` | ✅ |
-| WebView / Tauri 标为遗留（`src/LEGACY.md`、`src-tauri/LEGACY.md`） | ✅ |
-| macOS `.app` / `.dmg`：`npm run package:macos` | ✅ |
+| macOS `.app` / `.dmg`：`npm run package:macos` / `./tools/package-macos.sh` | ✅ |
 | Release CI 编原生 universal + Windows exe | ✅ |
 | README 架构与构建说明更新 | ✅ |
 
@@ -109,6 +107,5 @@ warm 3s + `ps` 1Hz × 20s；相对 v0.1.0+WebKit walking **17.37** 仍约 **−5
 ## 已知限制
 
 - 无整身倾斜 / 翻滚等复杂 idle 骨骼；腿尾为量化关键帧
-- 透明/穿透依赖 macOS `NSWindow`；跨 DPI 副屏未专项验证
+- 透明/穿透依赖 macOS `NSWindow`；光标坐标按主屏原点换算（副屏 chase / laser 已按 primary 校正，极端多 DPI 布局仍建议手测）
 - Windows 可编可跑，光标跟随/穿透完整度弱于 macOS（后续补）
-- 遗留 WebView 树尚未物理删除（便于对照）；默认不再启用

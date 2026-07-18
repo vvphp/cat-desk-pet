@@ -129,7 +129,14 @@ fn cgimage_from_premul_owned(
     let data_ptr = raw.cast::<c_void>();
 
     let data_provider = unsafe {
-        CGDataProvider::with_data(ptr::null_mut(), data_ptr, len, Some(release)).ok_or(())?
+        match CGDataProvider::with_data(ptr::null_mut(), data_ptr, len, Some(release)) {
+            Some(dp) => dp,
+            None => {
+                // Provider never took ownership — reclaim the box ourselves.
+                drop(Box::from_raw(raw));
+                return Err(());
+            }
+        }
     };
 
     let bitmap_info = CGBitmapInfo(
@@ -161,15 +168,18 @@ fn cgimage_from_premul_owned(
 }
 
 /// Global cursor in **top-left** logical desktop coords (winit space).
-/// Assumes primary-screen geometry (spike limitation; see docs).
+///
+/// Uses the **primary** screen (not `mainScreen`, which follows keyboard focus)
+/// so Y conversion stays correct when the cursor is on a secondary display.
 pub fn cursor_logical_top_left() -> Option<(f64, f64)> {
     let mtm = MainThreadMarker::new()?;
-    let screen = NSScreen::mainScreen(mtm)?;
-    let frame = screen.frame();
+    let screens = NSScreen::screens(mtm);
+    let primary = screens.firstObject()?;
+    let frame = primary.frame();
     let p = NSEvent::mouseLocation();
-    // Cocoa: origin bottom-left; winit outer_position: top-left.
+    // Cocoa global: origin at bottom-left of primary; winit: top-left, Y down.
     let x = p.x;
-    let y = frame.size.height - p.y;
+    let y = frame.origin.y + frame.size.height - p.y;
     Some((x, y))
 }
 
