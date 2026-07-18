@@ -1,9 +1,12 @@
 //! Softbuffer blit: original WebView SVG (via resvg) + procedural props.
 
-#![allow(dead_code)] // procedural body helpers kept as fallback / props
+#![allow(dead_code)] // shared ellipse/rect helpers + walking fallback body
 
-use crate::pet::{CoatColor, FlyerKind, GiftKind, IdleAction, Mode, Pet, Species, ToyKind};
+use crate::pet::{
+    CoatColor, FlyerKind, GiftKind, Mode, ParticleKind, Pet, Species, ToyKind,
+};
 use crate::sprite::{self, SpriteCache};
+use crate::text;
 
 pub const WIN: u32 = 180;
 
@@ -15,26 +18,28 @@ pub fn clear(buf: &mut [u32]) {
     buf.fill(0);
 }
 
+/// Draw pet + world props into a logical canvas.
+/// `origin_x/y` = desktop coords of the window's top-left (so props far from the
+/// pet stay visible when the OS window has grown to `visible_bounds`).
 pub fn draw_pet(
     buf: &mut [u32],
     w: u32,
     h: u32,
     pet: &Pet,
-    off_x: f64,
-    off_y: f64,
+    origin_x: f64,
+    origin_y: f64,
     sprites: &mut SpriteCache,
 ) {
     clear(buf);
-    let cx = w as f64 * 0.5 + off_x;
-    let cy = h as f64 * 0.55 + off_y;
+    let to_local = |x: f64, y: f64| (x - origin_x, y - origin_y);
+    let (cx, cy) = to_local(pet.x, pet.y);
 
     if pet.mode == Mode::InBed {
-        draw_bed(buf, w, h, cx, cy + 18.0);
+        let (bx, by) = to_local(pet.home_x, pet.home_y);
+        draw_bed(buf, w, h, bx, by + 18.0);
     } else if pet.mode == Mode::GoingHome {
-        // Bed waits at the home corner while the pet walks over.
-        let bx = cx + (pet.home_x - pet.x);
-        let by = cy + (pet.home_y - pet.y) + 18.0;
-        draw_bed(buf, w, h, bx, by);
+        let (bx, by) = to_local(pet.home_x, pet.home_y);
+        draw_bed(buf, w, h, bx, by + 18.0);
     }
 
     let bob = match pet.mode {
@@ -43,7 +48,8 @@ pub fn draw_pet(
         | Mode::Clingy
         | Mode::Interested
         | Mode::Chasing
-        | Mode::Playing => pet.walk_phase.sin() * 3.0,
+        | Mode::Playing
+        | Mode::Trick => pet.walk_phase.sin() * 3.0,
         Mode::Idle => (pet.idle_t * 1.6).sin() * 1.5,
         Mode::Pet => 0.0, // bob applied in pet tick via y
         Mode::Sleeping | Mode::InBed => (pet.sleep_t * 0.8).sin() * 0.8 + 6.0,
@@ -56,7 +62,7 @@ pub fn draw_pet(
 
     let sprite = sprites.pixels_for(pet);
     if !sprite.is_empty() {
-        sprite::blit_sprite(buf, w, h, sprite, pet.facing, bob, off_x, off_y);
+        sprite::blit_sprite(buf, w, h, sprite, pet.facing, bob, cx, cy);
     } else {
         // fallback if resvg fails
         draw_walking(buf, w, h, cx, cy + bob, pet);
@@ -67,18 +73,16 @@ pub fn draw_pet(
         draw_z(buf, w, h, cx + 36.0, cy - 36.0 + bob, z_alpha);
     }
 
-    // World props relative to pet center (window tracks pet).
+    // World props in the same desktop→local space as the pet.
     if let Some(feed) = &pet.feed {
-        let fx = cx + (feed.x - pet.x);
-        let fy = cy + (feed.y - pet.y);
+        let (fx, fy) = to_local(feed.x, feed.y);
         draw_food(buf, w, h, fx, fy, feed.eat_t.is_some(), pet.species);
     }
     if let Some(toy) = &pet.toy {
         if toy.kind == ToyKind::Laser {
-            draw_laser_trail(buf, w, h, pet, cx, cy);
+            draw_laser_trail(buf, w, h, pet, origin_x, origin_y);
         }
-        let tx = cx + (toy.x - pet.x);
-        let ty = cy + (toy.y - pet.y);
+        let (tx, ty) = to_local(toy.x, toy.y);
         match toy.kind {
             ToyKind::Yarn => draw_yarn(buf, w, h, tx, ty, toy.age),
             ToyKind::Ball => draw_ball(buf, w, h, tx, ty),
@@ -89,16 +93,24 @@ pub fn draw_pet(
         }
     }
     if let Some(flyer) = &pet.flyer {
-        let fx = cx + (flyer.x - pet.x);
-        let fy = cy + (flyer.y - pet.y);
+        let (fx, fy) = to_local(flyer.x, flyer.y);
         match flyer.kind {
             FlyerKind::Bird => draw_bird(buf, w, h, fx, fy, flyer.vx),
             FlyerKind::Butterfly => draw_butterfly(buf, w, h, fx, fy, flyer.age),
         }
     }
+    for p in &pet.particles {
+        let (px, py) = to_local(p.x, p.y);
+        draw_particle(buf, w, h, px, py, p);
+    }
+
+    if let Some(b) = &pet.bubble {
+        let (bx, by) = to_local(pet.x, pet.y - 58.0);
+        draw_speech_bubble(buf, w, h, bx, by, b);
+    }
+
     if let Some(gift) = &pet.gift {
-        let gx = cx + (gift.x - pet.x);
-        let gy = cy + (gift.y - pet.y);
+        let (gx, gy) = to_local(gift.x, gift.y);
         draw_gift(buf, w, h, gx, gy, gift.kind, gift.fade);
     }
 
@@ -178,7 +190,7 @@ fn draw_walking(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
     let (ir, ig, ib) = ink(pet);
     let bob = pet.walk_phase.sin() * 3.0;
     let leg = pet.walk_phase.sin() * 6.0;
-    fill_ellipse(buf, w, h, cx, cy + bob, 38.0, 28.0, r, g, b);
+    fill_ellipse(buf, w, h, cx, cy + bob, 28.0, 21.0, r, g, b);
     fill_ellipse(
         buf,
         w,
@@ -248,353 +260,9 @@ fn draw_walking(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
     );
 }
 
-fn draw_idle(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let breathe = (pet.idle_t * 1.6).sin() * 1.5;
-    let age = (pet.idle_action_t / pet.idle_action.duration()).clamp(0.0, 1.0);
-    let (mut sx, mut sy) = (1.0, 1.0);
-    let mut mouth_open = false;
-    let mut eyes_closed = false;
-    let mut eye_shift = 0.0;
-    let mut tail_extra = 0.0;
-    let mut body_ox = 0.0;
-    let mut body_oy = 0.0;
-    let mut head_oy = 0.0;
 
-    match pet.idle_action {
-        IdleAction::Sit => {
-            sy = 0.94;
-        }
-        IdleAction::Yawn => {
-            mouth_open = age < 0.7;
-            eyes_closed = true;
-            sy = 0.96;
-        }
-        IdleAction::Stretch => {
-            let k = (age * std::f64::consts::PI).sin();
-            sx = 1.0 + k * 0.12;
-            sy = 1.0 - k * 0.08;
-        }
-        IdleAction::Look => {
-            eye_shift = (pet.idle_t * 3.0).sin() * 2.0;
-        }
-        IdleAction::TailCurl => {
-            tail_extra = -18.0;
-        }
-        IdleAction::MudRoll => {
-            // Approximate roll: flatten + offset, then shake mud off.
-            if age < 0.62 {
-                let k = age / 0.62;
-                sx = 1.0 + k * 0.25;
-                sy = 1.0 - k * 0.35;
-                body_oy = k * 10.0;
-                head_oy = k * 18.0;
-                eyes_closed = true;
-            } else {
-                let k = ((age - 0.62) / 0.38).clamp(0.0, 1.0);
-                let shake = (1.0 - k) * (pet.idle_t * 28.0).sin() * 5.0;
-                body_ox = shake;
-                sx = 1.05;
-                sy = 0.92;
-            }
-        }
-        IdleAction::BackScratch => {
-            // Stand tall against the "wall" and rub up/down.
-            sx = 0.92;
-            sy = 1.12;
-            body_oy = (pet.idle_t * 5.0).sin() * 3.5;
-            head_oy = body_oy * 0.6;
-        }
-    }
 
-    let (r, g, b) = fur(pet);
-    let (ir, ig, ib) = ink(pet);
-    let body_cy = cy + 8.0 + breathe + body_oy;
-    let head_cy = cy - 22.0 + breathe + head_oy;
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + body_ox,
-        body_cy,
-        34.0 * sx,
-        30.0 * sy,
-        r,
-        g,
-        b,
-    );
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + body_ox,
-        head_cy,
-        26.0 * sx,
-        24.0 * sy,
-        r,
-        g,
-        b,
-    );
-    draw_coat_pattern(buf, w, h, cx + body_ox, body_cy, pet);
-    ear(buf, w, h, cx + body_ox - 14.0, head_cy - 22.0, -1.0, pet);
-    ear(buf, w, h, cx + body_ox + 14.0, head_cy - 22.0, 1.0, pet);
 
-    if eyes_closed {
-        fill_rect(
-            buf,
-            w,
-            h,
-            cx + body_ox - 12.0 + eye_shift,
-            head_cy - 2.0,
-            8.0,
-            2.0,
-            ir,
-            ig,
-            ib,
-        );
-        fill_rect(
-            buf,
-            w,
-            h,
-            cx + body_ox + 4.0 + eye_shift,
-            head_cy - 2.0,
-            8.0,
-            2.0,
-            ir,
-            ig,
-            ib,
-        );
-    } else {
-        fill_ellipse(
-            buf,
-            w,
-            h,
-            cx + body_ox - 8.0 + eye_shift,
-            head_cy - 2.0,
-            3.5,
-            4.5,
-            ir,
-            ig,
-            ib,
-        );
-        fill_ellipse(
-            buf,
-            w,
-            h,
-            cx + body_ox + 8.0 + eye_shift,
-            head_cy - 2.0,
-            3.5,
-            4.5,
-            ir,
-            ig,
-            ib,
-        );
-    }
-
-    if mouth_open {
-        fill_ellipse(
-            buf,
-            w,
-            h,
-            cx + body_ox,
-            head_cy + 10.0,
-            5.0,
-            7.0,
-            0x40,
-            0x20,
-            0x18,
-        );
-    }
-
-    draw_face(buf, w, h, cx + body_ox, head_cy, pet);
-    draw_tail(
-        buf,
-        w,
-        h,
-        cx + body_ox + 28.0 + tail_extra,
-        body_cy + 2.0,
-        pet,
-    );
-
-    if pet.idle_action == IdleAction::MudRoll && age < 0.62 {
-        // mud splatters
-        let (mr, mg, mb) = (0x6B, 0x4E, 0x3A);
-        let t = pet.idle_action_t;
-        for i in 0..4 {
-            let a = t * 3.0 + i as f64 * 1.4;
-            fill_ellipse(
-                buf,
-                w,
-                h,
-                cx + a.cos() * 28.0,
-                body_cy + 18.0 + a.sin() * 8.0,
-                3.0,
-                2.5,
-                mr,
-                mg,
-                mb,
-            );
-        }
-    }
-}
-
-fn draw_watching(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let (r, g, b) = fur(pet);
-    let (ir, ig, ib) = ink(pet);
-    fill_ellipse(buf, w, h, cx, cy + 6.0, 34.0, 28.0, r, g, b);
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 20.0,
-        cy - 18.0,
-        24.0,
-        22.0,
-        r,
-        g,
-        b,
-    );
-    ear(buf, w, h, cx + pet.facing * 10.0, cy - 38.0, pet.facing, pet);
-    ear(buf, w, h, cx + pet.facing * 28.0, cy - 36.0, pet.facing, pet);
-    // wide eyes
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 26.0 - 5.0,
-        cy - 20.0,
-        4.5,
-        5.5,
-        ir,
-        ig,
-        ib,
-    );
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 26.0 + 5.0,
-        cy - 20.0,
-        4.5,
-        5.5,
-        ir,
-        ig,
-        ib,
-    );
-    fill_ellipse(buf, w, h, cx - pet.facing * 32.0, cy + 4.0, 12.0, 5.0, r, g, b);
-}
-
-fn draw_chasing(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let (r, g, b) = fur(pet);
-    let (dr, dg, db) = fur_dark(pet);
-    let (ir, ig, ib) = ink(pet);
-    let bob = pet.walk_phase.sin() * 5.0;
-    let stretch = 1.12;
-    fill_ellipse(buf, w, h, cx, cy + bob, 40.0 * stretch, 24.0, r, g, b);
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 32.0,
-        cy - 14.0 + bob,
-        24.0,
-        20.0,
-        r,
-        g,
-        b,
-    );
-    ear(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 22.0,
-        cy - 34.0 + bob,
-        pet.facing,
-        pet,
-    );
-    ear(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 38.0,
-        cy - 32.0 + bob,
-        pet.facing,
-        pet,
-    );
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 38.0,
-        cy - 16.0 + bob,
-        4.0,
-        5.0,
-        ir,
-        ig,
-        ib,
-    );
-    let leg = pet.walk_phase.sin() * 10.0;
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx - 18.0,
-        cy + 20.0 + bob + leg,
-        7.0,
-        12.0,
-        dr,
-        dg,
-        db,
-    );
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + 18.0,
-        cy + 20.0 + bob - leg,
-        7.0,
-        12.0,
-        dr,
-        dg,
-        db,
-    );
-    // motion whiskers
-    let a = (((pet.chase_t * 20.0).sin() * 0.5 + 0.5) * 160.0) as u8;
-    fill_rect_alpha(
-        buf,
-        w,
-        h,
-        cx - pet.facing * 50.0,
-        cy + bob,
-        16.0,
-        2.0,
-        a,
-        0xE8,
-        0x9A,
-        0x3A,
-    );
-}
-
-fn draw_feeding(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let eating = pet.eat_anim_t > 0.0;
-    if eating {
-        // happy sit + chewing
-        let (r, g, b) = fur(pet);
-        let (ir, ig, ib) = ink(pet);
-        let bob = (pet.eat_anim_t * 14.0).sin() * 2.0;
-        fill_ellipse(buf, w, h, cx, cy + 8.0 + bob, 34.0, 28.0, r, g, b);
-        fill_ellipse(buf, w, h, cx, cy - 20.0 + bob, 24.0, 22.0, r, g, b);
-        ear(buf, w, h, cx - 12.0, cy - 40.0 + bob, -1.0, pet);
-        ear(buf, w, h, cx + 12.0, cy - 40.0 + bob, 1.0, pet);
-        fill_ellipse(buf, w, h, cx - 7.0, cy - 22.0 + bob, 3.0, 3.5, ir, ig, ib);
-        fill_ellipse(buf, w, h, cx + 7.0, cy - 22.0 + bob, 3.0, 3.5, ir, ig, ib);
-        let open = (pet.eat_anim_t * 16.0).sin() > 0.0;
-        if open {
-            fill_ellipse(buf, w, h, cx, cy - 10.0 + bob, 5.0, 6.0, 0x40, 0x20, 0x18);
-        }
-    } else {
-        draw_walking(buf, w, h, cx, cy, pet);
-    }
-}
 
 fn draw_gift(buf: &mut [u32], w: u32, h: u32, x: f64, y: f64, kind: GiftKind, fade: f64) {
     if fade < 0.05 {
@@ -825,7 +493,7 @@ fn draw_wand(buf: &mut [u32], w: u32, h: u32, x: f64, y: f64, spin_deg: f64) {
     fill_ellipse(buf, w, h, x, y, 3.5, 3.5, 0xF4, 0xE8, 0xA0);
 }
 
-fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &Pet, cx: f64, cy: f64) {
+fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &Pet, origin_x: f64, origin_y: f64) {
     let pts: Vec<_> = pet.laser_trail.iter().copied().collect();
     if pts.len() < 2 {
         return;
@@ -834,10 +502,10 @@ fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &Pet, cx: f64, cy: f64
     for i in 1..n {
         let a = pts[i - 1];
         let b = pts[i];
-        let ax = cx + (a.x - pet.x);
-        let ay = cy + (a.y - pet.y);
-        let bx = cx + (b.x - pet.x);
-        let by = cy + (b.y - pet.y);
+        let ax = a.x - origin_x;
+        let ay = a.y - origin_y;
+        let bx = b.x - origin_x;
+        let by = b.y - origin_y;
         let op = ((i as f64 / n as f64) * 0.55 * 255.0) as u8;
         let thick = 1.0 + i as f64 * 0.2;
         draw_line_alpha(buf, w, h, ax, ay, bx, by, thick, op, 0xFF, 0x35, 0x35);
@@ -934,96 +602,10 @@ fn draw_butterfly(buf: &mut [u32], w: u32, h: u32, x: f64, y: f64, age: f64) {
     fill_ellipse(buf, w, h, x, y, 2.5, 5.0, 0x3A, 0x2A, 0x40);
 }
 
-fn draw_startled(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let (r, g, b) = fur(pet);
-    let (ir, ig, ib) = ink(pet);
-    fill_ellipse(buf, w, h, cx, cy + 4.0, 34.0, 28.0, r, g, b);
-    fill_ellipse(buf, w, h, cx, cy - 20.0, 24.0, 22.0, r, g, b);
-    ear(buf, w, h, cx - 12.0, cy - 40.0, -1.0, pet);
-    ear(buf, w, h, cx + 12.0, cy - 40.0, 1.0, pet);
-    // huge eyes
-    fill_ellipse(buf, w, h, cx - 8.0, cy - 22.0, 5.0, 6.0, ir, ig, ib);
-    fill_ellipse(buf, w, h, cx + 8.0, cy - 22.0, 5.0, 6.0, ir, ig, ib);
-    fill_ellipse(buf, w, h, cx, cy - 8.0, 4.0, 5.0, 0x40, 0x20, 0x18);
-}
 
-fn draw_photo_pose(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let (r, g, b) = fur(pet);
-    let (ir, ig, ib) = ink(pet);
-    fill_ellipse(buf, w, h, cx, cy + 6.0, 34.0, 28.0, r, g, b);
-    fill_ellipse(buf, w, h, cx, cy - 20.0, 24.0, 22.0, r, g, b);
-    draw_coat_pattern(buf, w, h, cx, cy + 6.0, pet);
-    ear(buf, w, h, cx - 12.0, cy - 40.0, -1.0, pet);
-    ear(buf, w, h, cx + 12.0, cy - 40.0, 1.0, pet);
-    // starry happy eyes
-    fill_ellipse(buf, w, h, cx - 7.0, cy - 22.0, 3.5, 4.0, ir, ig, ib);
-    fill_ellipse(buf, w, h, cx + 7.0, cy - 22.0, 3.5, 4.0, ir, ig, ib);
-    fill_ellipse(buf, w, h, cx, cy - 10.0, 4.0, 3.0, 0xE8, 0x6A, 0x7A);
-    // sparkles
-    let a = (((pet.photo_t * 20.0).sin() * 0.5 + 0.5) * 220.0) as u8;
-    fill_rect_alpha(buf, w, h, cx + 28.0, cy - 36.0, 3.0, 3.0, a, 0xFF, 0xF0, 0x80);
-    fill_rect_alpha(buf, w, h, cx - 30.0, cy - 28.0, 3.0, 3.0, a, 0xFF, 0xF0, 0x80);
-}
 
-fn draw_dragged(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let (r, g, b) = fur(pet);
-    let (dr, dg, db) = fur_dark(pet);
-    let (ir, ig, ib) = ink(pet);
-    // dangling legs
-    fill_ellipse(buf, w, h, cx, cy, 36.0, 30.0, r, g, b);
-    fill_ellipse(
-        buf,
-        w,
-        h,
-        cx + pet.facing * 22.0,
-        cy - 20.0,
-        24.0,
-        22.0,
-        r,
-        g,
-        b,
-    );
-    ear(buf, w, h, cx + pet.facing * 12.0, cy - 40.0, pet.facing, pet);
-    ear(buf, w, h, cx + pet.facing * 30.0, cy - 38.0, pet.facing, pet);
-    // wide eyes
-    fill_ellipse(buf, w, h, cx + pet.facing * 26.0 - 6.0, cy - 22.0, 4.0, 5.5, ir, ig, ib);
-    fill_ellipse(buf, w, h, cx + pet.facing * 26.0 + 6.0, cy - 22.0, 4.0, 5.5, ir, ig, ib);
-    // open mouth
-    fill_ellipse(buf, w, h, cx + pet.facing * 26.0, cy - 10.0, 4.0, 5.0, 0x40, 0x20, 0x18);
-    fill_ellipse(buf, w, h, cx - 14.0, cy + 28.0, 6.0, 12.0, dr, dg, db);
-    fill_ellipse(buf, w, h, cx + 14.0, cy + 28.0, 6.0, 12.0, dr, dg, db);
-    fill_ellipse(buf, w, h, cx - pet.facing * 36.0, cy + 2.0, 12.0, 5.0, r, g, b);
-}
 
-fn draw_dizzy(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let (r, g, b) = fur(pet);
-    let (ir, ig, ib) = ink(pet);
-    let wobble = (pet.dizzy_t * 40.0).sin() * 10.0 * (1.0 - (pet.dizzy_t / 0.9).clamp(0.0, 1.0));
-    fill_ellipse(buf, w, h, cx + wobble * 0.3, cy + 6.0, 34.0, 28.0, r, g, b);
-    fill_ellipse(buf, w, h, cx + wobble, cy - 18.0, 24.0, 22.0, r, g, b);
-    ear(buf, w, h, cx + wobble - 12.0, cy - 38.0, -1.0, pet);
-    ear(buf, w, h, cx + wobble + 12.0, cy - 38.0, 1.0, pet);
-    // X eyes
-    fill_rect(buf, w, h, cx + wobble - 12.0, cy - 22.0, 8.0, 2.0, ir, ig, ib);
-    fill_rect(buf, w, h, cx + wobble - 12.0, cy - 18.0, 8.0, 2.0, ir, ig, ib);
-    fill_rect(buf, w, h, cx + wobble + 4.0, cy - 22.0, 8.0, 2.0, ir, ig, ib);
-    fill_rect(buf, w, h, cx + wobble + 4.0, cy - 18.0, 8.0, 2.0, ir, ig, ib);
-    // swirl
-    let a = (((pet.dizzy_t * 8.0).sin() * 0.5 + 0.5) * 200.0) as u8;
-    fill_ellipse(buf, w, h, cx + wobble + 28.0, cy - 36.0, 6.0, 6.0, a, 0x66, 0x55);
-}
 
-fn draw_sleeping(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
-    let (r, g, b) = fur(pet);
-    let (ir, ig, ib) = ink(pet);
-    let breathe = (pet.sleep_t * 0.8).sin() * 1.2;
-    fill_ellipse(buf, w, h, cx, cy + 10.0 + breathe, 42.0, 26.0, r, g, b);
-    fill_ellipse(buf, w, h, cx + 10.0, cy - 6.0 + breathe, 22.0, 18.0, r, g, b);
-    fill_rect(buf, w, h, cx + 4.0, cy - 8.0 + breathe, 8.0, 2.0, ir, ig, ib);
-    fill_rect(buf, w, h, cx + 16.0, cy - 8.0 + breathe, 8.0, 2.0, ir, ig, ib);
-    let z_alpha = (((pet.sleep_t * 1.2).sin() * 0.5 + 0.5) * 220.0) as u8;
-    draw_z(buf, w, h, cx + 36.0, cy - 36.0 + breathe, z_alpha);
-}
 
 fn draw_bed(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64) {
     fill_ellipse(buf, w, h, cx, cy + 6.0, 58.0, 16.0, 0x6B, 0x4E, 0x3A);
@@ -1202,6 +784,126 @@ fn draw_z(buf: &mut [u32], w: u32, h: u32, x: f64, y: f64, a: u8) {
     }
 }
 
+fn draw_speech_bubble(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    cx: f64,
+    cy: f64,
+    bubble: &crate::pet::SpeechBubble,
+) {
+    const PX: f32 = 13.0;
+    let (tw, th) = text::measure(&bubble.text, PX);
+    let pad_x = 12.0;
+    let pad_y = 7.0;
+    let scale = bubble.pop_scale();
+    let bw = (tw as f64 + pad_x * 2.0) * scale;
+    let bh = (th as f64 + pad_y * 2.0).max(22.0) * scale;
+    let x0 = cx - bw * 0.5;
+    let y0 = cy - bh;
+    // White capsule + soft shadow tint.
+    fill_round_rect(buf, w, h, x0 + 1.0, y0 + 2.0, bw, bh, 11.0 * scale, 0xE8, 0xE0, 0xD8, 90);
+    fill_round_rect(buf, w, h, x0, y0, bw, bh, 11.0 * scale, 0xFF, 0xFF, 0xFF, 245);
+    // Tail triangle pointing down at pet.
+    let tx = cx;
+    let ty = y0 + bh;
+    fill_triangle_alpha(
+        buf,
+        w,
+        h,
+        tx - 5.0 * scale,
+        ty,
+        tx + 5.0 * scale,
+        ty,
+        tx,
+        ty + 7.0 * scale,
+        245,
+        0xFF,
+        0xFF,
+        0xFF,
+    );
+    let text_x = x0 + pad_x * scale;
+    let text_y = y0 + pad_y * scale * 0.6;
+    text::blit_text(
+        buf,
+        w,
+        h,
+        text_x,
+        text_y,
+        &bubble.text,
+        PX * scale as f32,
+        0x3A,
+        0x2A,
+        0x20,
+        1.0,
+    );
+}
+
+fn draw_particle(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    x: f64,
+    y: f64,
+    p: &crate::pet::Particle,
+) {
+    let a = (p.alpha() * 255.0) as u8;
+    if a < 8 {
+        return;
+    }
+    match p.kind {
+        ParticleKind::Heart | ParticleKind::Kiss => {
+            let label = if p.kind == ParticleKind::Kiss {
+                "💋"
+            } else {
+                "❤"
+            };
+            text::blit_text(buf, w, h, x - 6.0, y - 8.0, label, 14.0, 0xE0, 0x40, 0x70, p.alpha() as f32);
+        }
+        ParticleKind::Zzz => {
+            text::blit_text(buf, w, h, x, y, "Z", 12.0, 0x55, 0x44, 0x66, p.alpha() as f32);
+        }
+        ParticleKind::Dust => {
+            fill_ellipse_alpha(buf, w, h, x, y, 4.0 + p.t() * 6.0, 3.0 + p.t() * 4.0, a / 2, 0xC0, 0xB0, 0xA0);
+        }
+        ParticleKind::Footprint => {
+            fill_ellipse_alpha(buf, w, h, x, y, 4.0, 2.5, a / 3, 0x80, 0x70, 0x60);
+            fill_ellipse_alpha(buf, w, h, x + 5.0, y + 1.0, 3.5, 2.2, a / 3, 0x80, 0x70, 0x60);
+        }
+        ParticleKind::Mud => {
+            fill_ellipse_alpha(buf, w, h, x, y, 3.5, 3.0, a, 0x6B, 0x4E, 0x31);
+        }
+        ParticleKind::Dream => {
+            let label = p.label.unwrap_or("💤");
+            fill_round_rect(buf, w, h, x - 12.0, y - 10.0, 28.0, 22.0, 8.0, 0xFF, 0xFF, 0xFF, a);
+            text::blit_text(buf, w, h, x - 8.0, y - 8.0, label, 14.0, 0x3A, 0x2A, 0x20, p.alpha() as f32);
+        }
+    }
+}
+
+fn fill_round_rect(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    x: f64,
+    y: f64,
+    rw: f64,
+    rh: f64,
+    radius: f64,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    let rad = radius.min(rw * 0.5).min(rh * 0.5);
+    fill_rect_alpha(buf, w, h, x + rad, y, rw - rad * 2.0, rh, a, r, g, b);
+    fill_rect_alpha(buf, w, h, x, y + rad, rw, rh - rad * 2.0, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rad, y + rad, rad, rad, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rw - rad, y + rad, rad, rad, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rad, y + rh - rad, rad, rad, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rw - rad, y + rh - rad, rad, rad, a, r, g, b);
+}
+
 fn fill_ellipse(
     buf: &mut [u32],
     w: u32,
@@ -1305,11 +1007,32 @@ fn put(buf: &mut [u32], w: u32, h: u32, x: u32, y: u32, c: u32) {
 }
 
 pub fn hit_pet(buf: &[u32], w: u32, h: u32, lx: f64, ly: f64) -> bool {
-    let x = lx.floor() as i32;
-    let y = ly.floor() as i32;
-    if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+    hit_pet_padded(buf, w, h, lx, ly, 0)
+}
+
+/// Alpha hit-test with optional padding (passthrough uses a small pad).
+pub fn hit_pet_padded(buf: &[u32], w: u32, h: u32, lx: f64, ly: f64, pad: i32) -> bool {
+    let need = (w as usize).saturating_mul(h as usize);
+    if w == 0 || h == 0 || buf.len() < need {
         return false;
     }
-    let c = buf[(y as u32 * w + x as u32) as usize];
-    ((c >> 24) & 0xFF) > 16
+    let x = lx.floor() as i32;
+    let y = ly.floor() as i32;
+    let wi = w as i32;
+    let hi = h as i32;
+    let pad = pad.max(0);
+    for dy in -pad..=pad {
+        for dx in -pad..=pad {
+            let xx = x + dx;
+            let yy = y + dy;
+            if xx < 0 || yy < 0 || xx >= wi || yy >= hi {
+                continue;
+            }
+            let c = buf[(yy as u32 * w + xx as u32) as usize];
+            if ((c >> 24) & 0xFF) > 16 {
+                return true;
+            }
+        }
+    }
+    false
 }

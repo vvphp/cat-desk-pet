@@ -1,80 +1,17 @@
-//! Phase 2 pet state machine (native-spike).
+//! Pet behaviour state machine.
 //! + cursor: interested / watching / chasing
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Walking,
-    Idle,
-    Sleeping,
-    /// Walk toward the corner bed, then become `InBed`.
-    GoingHome,
-    InBed,
-    Dragged,
-    Dizzy,
-    /// Held/stroked without dragging — hearts face until release.
-    Pet,
-    /// Walk over to idle cursor after long inactivity.
-    Clingy,
-    Interested,
-    Watching,
-    Chasing,
-    Feeding,
-    Playing,
-    BirdWatch,
-    ButterflyNose,
-    Startled,
-    Photo,
-    Gifting,
-}
+mod bubble;
+mod mode;
+mod particle;
+mod rng;
 
-impl Mode {
-    pub fn frame_interval(self) -> Duration {
-        match self {
-            Mode::Sleeping | Mode::InBed => Duration::from_millis(125),
-            Mode::Idle | Mode::Dizzy | Mode::Pet | Mode::Watching | Mode::BirdWatch => {
-                Duration::from_millis(66)
-            }
-            Mode::Walking
-            | Mode::GoingHome
-            | Mode::Clingy
-            | Mode::Interested
-            | Mode::Feeding
-            | Mode::ButterflyNose
-            | Mode::Gifting => Duration::from_millis(40),
-            Mode::Dragged
-            | Mode::Chasing
-            | Mode::Playing
-            | Mode::Startled
-            | Mode::Photo => Duration::from_millis(33),
-        }
-    }
+pub use bubble::SpeechBubble;
+pub use mode::{Mode, TrickAction};
+pub use particle::{Particle, ParticleKind};
 
-    pub fn is_asleep(self) -> bool {
-        matches!(self, Mode::Sleeping | Mode::InBed)
-    }
-
-    fn cursor_locked(self) -> bool {
-        matches!(
-            self,
-            Mode::Sleeping
-                | Mode::GoingHome
-                | Mode::InBed
-                | Mode::Dragged
-                | Mode::Dizzy
-                | Mode::Pet
-                | Mode::Clingy
-                | Mode::Feeding
-                | Mode::Playing
-                | Mode::ButterflyNose
-                | Mode::Startled
-                | Mode::Photo
-                | Mode::Gifting
-        )
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GiftKind {
@@ -493,10 +430,25 @@ pub struct Pet {
     last_sig_move_t: f64,
     last_clingy_t: f64,
     pub clingy_arrived: bool,
+    /// Speech bubble above the pet (WebView `#bubble`).
+    pub bubble: Option<SpeechBubble>,
+    pub particles: Vec<Particle>,
+    /// Soft mood 0..100 (trick weights + meow flavor).
+    pub mood: f64,
+    pub trick_action: Option<TrickAction>,
+    last_ambient_meow_t: f64,
+    last_tap_t: f64,
+    last_zzz_bubble_t: f64,
+    last_footprint_t: f64,
+    last_dream_t: f64,
+    /// One-shot flags so eat/gift bubbles don't spam.
+    ate_bubble_shown: bool,
+    kiss_particle_shown: bool,
 }
 
 impl Pet {
-    pub const SIZE: f64 = 160.0;
+    /// Footprint / clamp margin — matches WebView cat (~120 CSS px).
+    pub const SIZE: f64 = 120.0;
 
     pub fn new(screen_w: f64, screen_h: f64) -> Self {
         let x = screen_w * 0.5;
@@ -547,6 +499,17 @@ impl Pet {
             last_sig_move_t: 0.0,
             last_clingy_t: -120.0,
             clingy_arrived: false,
+            bubble: None,
+            particles: Vec::new(),
+            mood: 55.0,
+            trick_action: None,
+            last_ambient_meow_t: 0.0,
+            last_tap_t: -10.0,
+            last_zzz_bubble_t: -10.0,
+            last_footprint_t: -10.0,
+            last_dream_t: -10.0,
+            ate_bubble_shown: false,
+            kiss_particle_shown: false,
         }
     }
 
@@ -559,21 +522,93 @@ impl Pet {
         self.clamp_pos();
     }
 
+    /// Desktop-logical axis-aligned bounds that must stay visible (pet + world props).
+    /// Used to grow the small window so toys / flyers aren't clipped.
+    pub fn visible_bounds(&self) -> (f64, f64, f64, f64) {
+        // Match the idle pet window (~180²) footprint around the pet.
+        const BASE: f64 = 180.0;
+        let half = BASE * 0.5;
+        let mut min_x = self.x - half;
+        let mut max_x = self.x + half;
+        // Extra headroom for speech bubbles above the pet.
+        let mut min_y = self.y - half - 56.0;
+        let mut max_y = self.y + half;
+
+        let mut include = |x: f64, y: f64, pad: f64| {
+            min_x = min_x.min(x - pad);
+            max_x = max_x.max(x + pad);
+            min_y = min_y.min(y - pad);
+            max_y = max_y.max(y + pad);
+        };
+
+        if let Some(b) = &self.bubble {
+            let tw = (b.text.chars().count() as f64 * 9.0).clamp(48.0, 160.0);
+            include(self.x, self.y - 70.0, tw * 0.5 + 12.0);
+        }
+        for p in &self.particles {
+            include(p.x, p.y, 20.0);
+        }
+
+        if let Some(t) = &self.toy {
+            include(t.x, t.y, 48.0);
+            if t.kind == ToyKind::Laser {
+                for p in &self.laser_trail {
+                    include(p.x, p.y, 24.0);
+                }
+            }
+        }
+        if let Some(f) = &self.flyer {
+            include(f.x, f.y, 40.0);
+        }
+        if let Some(feed) = &self.feed {
+            include(feed.x, feed.y, 36.0);
+        }
+        if let Some(g) = &self.gift {
+            include(g.x, g.y, 36.0);
+        }
+        if matches!(self.mode, Mode::GoingHome | Mode::InBed) {
+            include(self.home_x, self.home_y, 70.0);
+        }
+
+        // Clamp to screen so the OS window never exceeds the desktop.
+        min_x = min_x.max(0.0);
+        min_y = min_y.max(0.0);
+        max_x = max_x.min(self.screen_w);
+        max_y = max_y.min(self.screen_h);
+        if max_x - min_x < BASE {
+            max_x = (min_x + BASE).min(self.screen_w);
+            min_x = (max_x - BASE).max(0.0);
+        }
+        if max_y - min_y < BASE {
+            max_y = (min_y + BASE).min(self.screen_h);
+            min_y = (max_y - BASE).max(0.0);
+        }
+        (min_x, min_y, max_x, max_y)
+    }
+
     pub fn note_cursor(&mut self, pos: Option<(f64, f64)>) {
         self.cursor = pos;
         let Some((x, y)) = pos else {
+            self.prune_cursor_trail();
             return;
         };
-        if let Some(last) = self.cursor_trail.back() {
-            if (last.x - x).abs() < 0.5 && (last.y - y).abs() < 0.5 {
-                return;
-            }
+        let moved = match self.cursor_trail.back() {
+            Some(last) => (last.x - x).abs() >= 0.5 || (last.y - y).abs() >= 0.5,
+            None => true,
+        };
+        if moved {
+            self.cursor_trail.push_back(CursorSample {
+                x,
+                y,
+                t: self.clock,
+            });
         }
-        self.cursor_trail.push_back(CursorSample {
-            x,
-            y,
-            t: self.clock,
-        });
+        // Always prune / recompute — stationary cursor must still decay amt
+        // so Interested / Watching can end.
+        self.prune_cursor_trail();
+    }
+
+    fn prune_cursor_trail(&mut self) {
         while let Some(front) = self.cursor_trail.front() {
             if self.clock - front.t > 1.5 {
                 self.cursor_trail.pop_front();
@@ -597,14 +632,16 @@ impl Pet {
 
     pub fn wake(&mut self) {
         if self.mode.is_asleep() {
-            self.enter_idle();
+            self.transition(Mode::Idle);
+            // After idle-start bubble (if any) — waking message wins.
+            self.show_bubble("睡饱啦~", 1.5);
         }
     }
 
     pub fn go_sleep(&mut self) {
         self.dragging = false;
         self.interrupt_gift();
-        self.enter(Mode::Sleeping);
+        self.transition(Mode::Sleeping);
     }
 
     pub fn go_to_bed(&mut self) {
@@ -622,9 +659,9 @@ impl Pet {
         if (dx * dx + dy * dy).sqrt() < 12.0 {
             self.x = self.home_x;
             self.y = self.home_y;
-            self.enter(Mode::InBed);
+            self.transition(Mode::InBed);
         } else {
-            self.enter(Mode::GoingHome);
+            self.transition(Mode::GoingHome);
             self.mode_until = 12.0;
         }
     }
@@ -656,12 +693,11 @@ impl Pet {
             lingering: false,
         });
         self.gift_cooldown = 180.0 + (fastrand_u64() % 120) as f64;
-        self.mode = Mode::Gifting;
-        self.mode_elapsed = 0.0;
+        // Approach cursor Y band via target_y — do not teleport / permanently
+        // rewrite floor_y (post-gift walking must keep a stable ground).
+        self.target_y = (gy + 40.0).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        self.transition(Mode::Gifting);
         self.mode_until = 15.0;
-        // Walk toward cursor Y band a bit.
-        self.floor_y = (gy + 40.0).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
-        self.y = self.floor_y;
     }
 
     fn interrupt_gift(&mut self) {
@@ -752,7 +788,7 @@ impl Pet {
         self.laser_trail.clear();
         if self.mode == Mode::Playing {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
         }
     }
 
@@ -842,6 +878,7 @@ impl Pet {
         self.mode_until = 1.2;
         self.photo_t = 0.0;
         self.flash = 1.0;
+        self.show_bubble("茄子~ 📸", 1.3);
     }
 
     pub fn begin_drag(&mut self) {
@@ -867,6 +904,118 @@ impl Pet {
         self.force_scene = None;
     }
 
+    pub fn show_bubble(&mut self, text: impl Into<String>, dur: f64) {
+        self.bubble = Some(SpeechBubble {
+            text: text.into(),
+            age: 0.0,
+            dur,
+        });
+    }
+
+    pub fn clear_bubble(&mut self) {
+        self.bubble = None;
+    }
+
+    fn spawn_particle(&mut self, kind: ParticleKind, x: f64, y: f64, life: f64) {
+        self.particles.push(Particle::new(kind, x, y, life));
+    }
+
+    fn bump_mood(&mut self, delta: f64) {
+        self.mood = (self.mood + delta).clamp(0.0, 100.0);
+    }
+
+    /// Short click / double-tap → trick (WebView mouseup path).
+    pub fn on_short_click(&mut self) {
+        if matches!(
+            self.mode,
+            Mode::GoingHome | Mode::Feeding | Mode::Dragged | Mode::Photo | Mode::Trick
+        ) {
+            return;
+        }
+        if self.clock - self.last_tap_t < 0.35 {
+            self.last_tap_t = 0.0;
+            self.start_trick(TrickAction::Kiss);
+            return;
+        }
+        self.last_tap_t = self.clock;
+        self.bump_mood(2.0);
+        let action = self.pick_trick_action();
+        self.start_trick(action);
+    }
+
+    fn pick_trick_action(&self) -> TrickAction {
+        // Neutral mood weights (mood≈50): lean meow/heart like WebView mid mood.
+        const WEIGHTS: &[(TrickAction, f64)] = &[
+            (TrickAction::Meow, 0.20),
+            (TrickAction::Heart, 0.16),
+            (TrickAction::Spin, 0.12),
+            (TrickAction::Pounce, 0.09),
+            (TrickAction::HappyJump, 0.08),
+            (TrickAction::Grumpy, 0.08),
+            (TrickAction::Wave, 0.09),
+            (TrickAction::Shy, 0.09),
+            (TrickAction::SwatCursor, 0.09),
+        ];
+        let m = (self.mood / 100.0).clamp(0.0, 1.0);
+        // Blend toward happier weights when mood high.
+        let happy_boost = [0.0, 0.12, 0.04, 0.0, 0.08, -0.12, 0.04, -0.06, 0.02];
+        let mut total = 0.0;
+        let mut ws = [0.0; 9];
+        for (i, (_, w0)) in WEIGHTS.iter().enumerate() {
+            ws[i] = (w0 + happy_boost[i] * (m - 0.5) * 2.0).max(0.01);
+            total += ws[i];
+        }
+        let mut r = (fastrand_u64() as f64 / u64::MAX as f64) * total;
+        for (i, (action, _)) in WEIGHTS.iter().enumerate() {
+            r -= ws[i];
+            if r <= 0.0 {
+                return *action;
+            }
+        }
+        TrickAction::Meow
+    }
+
+    pub fn start_trick(&mut self, action: TrickAction) {
+        if self.dragging {
+            return;
+        }
+        self.force_scene = None;
+        if self.mode.is_asleep() {
+            self.wake();
+        }
+        self.kiss_particle_shown = false;
+        self.trick_action = Some(action);
+        self.mode = Mode::Trick;
+        self.mode_elapsed = 0.0;
+        self.mode_until = action.duration();
+        let rng = fastrand_u64();
+        match action {
+            TrickAction::Meow => {
+                let t = bubble::pick_meow(
+                    self.species,
+                    self.mood,
+                    false,
+                    self.cursor_move_amt,
+                    self.clock - self.last_sig_move_t,
+                    rng,
+                );
+                self.show_bubble(t, 1.3);
+            }
+            TrickAction::Heart => {
+                self.show_bubble(bubble::pick_hearts(rng), 1.5);
+                self.spawn_particle(ParticleKind::Heart, self.x, self.y - 30.0, 1.6);
+            }
+            TrickAction::Grumpy => self.show_bubble(bubble::pick_grumpy_line(rng), 1.2),
+            TrickAction::Wave => self.show_bubble(bubble::pick_wave(rng), 1.3),
+            TrickAction::Shy => self.show_bubble(bubble::pick_shy(rng), 1.4),
+            TrickAction::Kiss => self.show_bubble(bubble::pick_kiss(rng), 1.2),
+            TrickAction::Spin | TrickAction::Pounce | TrickAction::HappyJump => {}
+            TrickAction::SwatCursor => {
+                self.show_bubble("!", 0.7);
+            }
+        }
+    }
+
     /// Enter petting after a long press without dragging (~0.5s).
     pub fn start_pet(&mut self) {
         if self.dragging || self.mode == Mode::Pet {
@@ -880,11 +1029,14 @@ impl Pet {
         }
         self.mode = Mode::Pet;
         self.mode_elapsed = 0.0;
+        self.show_bubble("咕噜咕噜~", 10.0);
     }
 
     pub fn end_pet(&mut self) {
         if self.mode == Mode::Pet {
-            self.enter_idle();
+            self.clear_bubble();
+            self.spawn_particle(ParticleKind::Heart, self.x + 8.0, self.y - 24.0, 1.5);
+            self.transition(Mode::Idle);
         }
     }
 
@@ -902,11 +1054,8 @@ impl Pet {
         let jitter_y = 40.0 + (fastrand_u64() % 40) as f64;
         self.target_x = (cx + jitter_x).clamp(40.0, self.screen_w - 40.0);
         self.target_y = (cy + jitter_y).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
-        self.clingy_arrived = false;
         self.last_clingy_t = self.clock;
-        self.mode = Mode::Clingy;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 9.0;
+        self.transition(Mode::Clingy);
     }
 
     pub fn end_drag(&mut self) {
@@ -917,7 +1066,7 @@ impl Pet {
             self.mode_elapsed = 0.0;
             self.dizzy_t = 0.0;
         } else {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
@@ -936,6 +1085,16 @@ impl Pet {
     pub fn update(&mut self, dt: f64) {
         self.clock += dt;
         self.flash = (self.flash - dt * 2.2).max(0.0);
+        // Mood drifts toward neutral 50.
+        self.mood += (50.0 - self.mood) * dt * 0.003;
+
+        if let Some(b) = &mut self.bubble {
+            b.age += dt;
+            if !b.alive() {
+                self.bubble = None;
+            }
+        }
+        particle::tick_particles(&mut self.particles, dt);
 
         if self.dragging {
             self.mode = Mode::Dragged;
@@ -951,6 +1110,7 @@ impl Pet {
         }
 
         self.maybe_ambient_event(dt);
+        self.maybe_ambient_meow();
         self.maybe_clingy();
         self.maybe_react_to_cursor();
         self.phys_flyer(dt);
@@ -965,18 +1125,26 @@ impl Pet {
             Mode::Sleeping => self.tick_sleeping(dt),
             Mode::GoingHome => self.tick_going_home(dt),
             Mode::InBed => self.tick_in_bed(dt),
-            Mode::Dragged => self.enter_idle(),
+            Mode::Dragged => self.transition(Mode::Idle),
             Mode::Pet => {
                 // Held; release from App ends it. Soft bob + tail phase while petted.
                 self.walk_phase = (self.walk_phase + dt * 6.0) % std::f64::consts::TAU;
                 self.y = self.floor_y + (self.mode_elapsed * 3.0).sin() * 1.2;
+                if fastrand_chance(0.04) {
+                    self.spawn_particle(
+                        ParticleKind::Heart,
+                        self.x + ((fastrand_u64() % 24) as f64 - 12.0),
+                        self.y - 28.0,
+                        1.5,
+                    );
+                }
             }
             Mode::Clingy => self.tick_clingy(dt),
             Mode::Dizzy => {
                 self.dizzy_t += dt;
                 if self.mode_elapsed > 0.9 {
                     self.pick_new_target();
-                    self.enter(Mode::Walking);
+                    self.transition(Mode::Walking);
                 }
             }
             Mode::Interested => self.tick_interested(dt),
@@ -987,17 +1155,84 @@ impl Pet {
             Mode::BirdWatch => self.tick_bird_watch(dt),
             Mode::ButterflyNose => self.tick_butterfly_nose(dt),
             Mode::Gifting => self.tick_gifting(dt),
+            Mode::Trick => self.tick_trick(dt),
             Mode::Startled => {
                 if self.mode_elapsed > 0.7 {
-                    self.enter_idle();
+                    self.transition(Mode::Idle);
                 }
             }
             Mode::Photo => {
                 self.photo_t += dt;
                 if self.mode_elapsed > self.mode_until {
-                    self.enter_idle();
+                    self.transition(Mode::Idle);
                 }
             }
+        }
+    }
+
+    fn maybe_ambient_meow(&mut self) {
+        if !matches!(self.mode, Mode::Walking | Mode::Idle) {
+            return;
+        }
+        let gap = 35.0 + (fastrand_u64() % 35000) as f64 / 1000.0;
+        if self.clock - self.last_ambient_meow_t < gap {
+            return;
+        }
+        // Only when fairly calm / not mid-chase energy.
+        if self.cursor_move_amt > 80.0 {
+            return;
+        }
+        self.last_ambient_meow_t = self.clock;
+        self.show_bubble(bubble::pick_curious(self.species, fastrand_u64()), 1.1);
+    }
+
+    fn tick_trick(&mut self, dt: f64) {
+        let Some(action) = self.trick_action else {
+            self.transition(Mode::Idle);
+            return;
+        };
+        let t = (self.mode_elapsed / self.mode_until.max(0.01)).clamp(0.0, 1.0);
+        match action {
+            TrickAction::Spin => {
+                self.facing = if ((self.mode_elapsed * 8.0) as i32) % 2 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                self.walk_phase = (self.walk_phase + dt * 20.0) % std::f64::consts::TAU;
+                self.y = self.floor_y;
+            }
+            TrickAction::Pounce | TrickAction::HappyJump => {
+                let hop = if t < 0.45 {
+                    -(t / 0.45) * 22.0
+                } else {
+                    -22.0 * (1.0 - (t - 0.45) / 0.55)
+                };
+                self.y = self.floor_y + hop;
+                self.walk_phase = (self.walk_phase + dt * 14.0) % std::f64::consts::TAU;
+                if t > 0.5 && action == TrickAction::Pounce {
+                    self.spawn_particle(ParticleKind::Dust, self.x, self.floor_y + 18.0, 0.55);
+                }
+            }
+            TrickAction::Kiss => {
+                self.y = self.floor_y;
+                if !self.kiss_particle_shown && t > 0.35 {
+                    self.kiss_particle_shown = true;
+                    self.spawn_particle(ParticleKind::Kiss, self.x + self.facing * 10.0, self.y - 10.0, 1.4);
+                }
+            }
+            TrickAction::SwatCursor => {
+                self.y = self.floor_y - 8.0 * (1.0 - t);
+                self.walk_phase = (self.walk_phase + dt * 16.0) % std::f64::consts::TAU;
+            }
+            _ => {
+                self.y = self.floor_y;
+                self.walk_phase = (self.walk_phase + dt * 8.0) % std::f64::consts::TAU;
+            }
+        }
+        if self.mode_elapsed >= self.mode_until {
+            self.trick_action = None;
+            self.transition(Mode::Idle);
         }
     }
 
@@ -1021,24 +1256,25 @@ impl Pet {
     fn tick_clingy(&mut self, dt: f64) {
         if self.mode_elapsed > self.mode_until {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
+        // Path on floor_y (ground); bob is applied after — never write bob into floor.
         let dx = self.target_x - self.x;
-        let dy = self.target_y - self.y;
+        let dy = self.target_y - self.floor_y;
         let dist = (dx * dx + dy * dy).sqrt();
         // Walk for the first ~4s of the 9s window (mirror WebView modeUntil-5000).
         if dist > 8.0 && self.mode_elapsed < self.mode_until - 5.0 {
             let speed = 60.0 * self.species.speed();
             let step = (speed * dt).min(dist);
             self.x += dx / dist * step;
-            self.y += dy / dist * step;
-            self.floor_y = self.y.clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+            self.floor_y = (self.floor_y + dy / dist * step)
+                .clamp(self.screen_h * 0.55, self.screen_h * 0.85);
             if dx.abs() > 2.0 {
                 self.facing = if dx > 0.0 { 1.0 } else { -1.0 };
             }
             self.walk_phase = (self.walk_phase + dt * 9.0) % std::f64::consts::TAU;
-            self.y += self.walk_phase.sin() * 2.0;
+            self.y = self.floor_y + self.walk_phase.sin() * 2.0;
         } else {
             self.clingy_arrived = true;
             self.y = self.floor_y + (self.mode_elapsed * 1.8).sin() * 1.5;
@@ -1091,33 +1327,38 @@ impl Pet {
         let active = self.cursor_move_amt > 60.0;
         let fast = self.cursor_move_amt > 220.0;
 
+        // Cursor already on the body: stay put so hover/click doesn't chase us away.
+        const ON_BODY: f64 = 64.0;
+
         match self.mode {
             Mode::Walking | Mode::Idle => {
-                if active && dist < 280.0 {
-                    self.enter_interested();
+                if active && dist > ON_BODY && dist < 280.0 {
+                    self.transition(Mode::Interested);
                 } else if fast && dist >= 280.0 && dist < 900.0 {
-                    self.enter_watching();
+                    self.transition(Mode::Watching);
                 }
             }
             Mode::Interested => {
-                // escalate: close + very active → chase
-                if fast && dist < 320.0 && self.mode_elapsed > 0.4 {
-                    self.enter_chasing();
+                if dist < ON_BODY {
+                    self.transition(Mode::Idle);
+                } else if fast && dist < 320.0 && self.mode_elapsed > 0.4 {
+                    // escalate: close + very active → chase
+                    self.transition(Mode::Chasing);
                 } else if !active || dist > 380.0 || self.mode_elapsed > self.mode_until {
                     self.pick_new_target();
-                    self.enter(Mode::Walking);
+                    self.transition(Mode::Walking);
                 }
             }
             Mode::Watching => {
                 if self.mode_elapsed > self.mode_until || (dist < 280.0 && active) {
                     // hand off — next tick may go interested
                     self.pick_new_target();
-                    self.enter(Mode::Walking);
+                    self.transition(Mode::Walking);
                 }
             }
             Mode::Chasing => {
                 if self.mode_elapsed > self.mode_until {
-                    self.enter_idle();
+                    self.transition(Mode::Idle);
                 }
             }
             _ => {}
@@ -1126,9 +1367,18 @@ impl Pet {
 
     fn tick_interested(&mut self, dt: f64) {
         let Some((cx, cy)) = self.cursor else {
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
+        let dist = ((cx - self.x).powi(2) + (cy - self.y).powi(2)).sqrt();
+        // Pointer on us: freeze orbit so hover doesn't look like a shake.
+        if dist < 64.0 {
+            self.y = self.floor_y;
+            if (cx - self.x).abs() > 18.0 {
+                self.facing = (cx - self.x).signum();
+            }
+            return;
+        }
         self.interested_jitter += dt * 1.5;
         self.walk_phase = (self.walk_phase + dt * 9.0) % (std::f64::consts::TAU);
         let desired = 110.0;
@@ -1156,7 +1406,7 @@ impl Pet {
         self.chase_t += dt;
         self.walk_phase = (self.walk_phase + dt * 14.0) % (std::f64::consts::TAU);
         let Some((cx, cy)) = self.cursor else {
-            self.enter_idle();
+            self.transition(Mode::Idle);
             return;
         };
         // sprint toward cursor with a little lead
@@ -1172,20 +1422,20 @@ impl Pet {
         }
         // catch: close enough → brief idle celebration then continue or stop
         if d < 48.0 && self.mode_elapsed > 0.6 {
-            self.enter_idle();
+            self.transition(Mode::Idle);
         }
     }
 
     fn tick_feeding(&mut self, dt: f64) {
         let Some(mut feed) = self.feed.take() else {
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
         feed.age += dt;
         if self.mode_elapsed > self.mode_until || feed.age > 25.0 {
             self.feed = None;
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
 
@@ -1195,13 +1445,32 @@ impl Pet {
         if dist < 28.0 {
             if feed.eat_t.is_none() {
                 feed.eat_t = Some(0.0);
+                self.ate_bubble_shown = false;
             }
             if let Some(t) = feed.eat_t.as_mut() {
                 *t += dt;
                 self.eat_anim_t = *t;
+                if *t > 0.35 && !self.ate_bubble_shown {
+                    self.ate_bubble_shown = true;
+                    self.show_bubble(bubble::eat_bubble(self.species), 1.5);
+                    self.bump_mood(match self.species {
+                        Species::Cat => 15.0,
+                        Species::Pig => 20.0,
+                        Species::Bear => 28.0,
+                    });
+                    for _ in 0..bubble::eat_heart_count(self.species) {
+                        self.spawn_particle(
+                            ParticleKind::Heart,
+                            self.x + ((fastrand_u64() % 20) as f64 - 10.0),
+                            self.y - 26.0,
+                            1.6,
+                        );
+                    }
+                }
                 if *t > 1.4 {
                     self.feed = None;
-                    self.enter_idle();
+                    self.show_bubble("嗝~", 0.9);
+                    self.transition(Mode::Idle);
                     return;
                 }
             }
@@ -1209,6 +1478,7 @@ impl Pet {
         } else {
             feed.eat_t = None;
             self.eat_anim_t = 0.0;
+            self.ate_bubble_shown = false;
             self.move_toward(feed.x, feed.y, 120.0 * self.speed_mul() * dt);
             if dx.abs() > 8.0 {
                 self.facing = dx.signum();
@@ -1222,7 +1492,7 @@ impl Pet {
         let Some(toy) = self.toy.as_ref() else {
             self.laser_trail.clear();
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
         let cursor_toy = toy.kind.is_cursor_driven();
@@ -1231,8 +1501,9 @@ impl Pet {
         if self.mode_elapsed > self.mode_until || toy.age > max_age || toy.hits >= max_hits {
             self.toy = None;
             self.laser_trail.clear();
+            self.show_bubble(bubble::toy_done_bubble(fastrand_u64()), 1.2);
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
 
@@ -1350,7 +1621,7 @@ impl Pet {
             self.laser_trail.clear();
             if self.mode == Mode::Playing {
                 self.pick_new_target();
-                self.enter(Mode::Walking);
+                self.transition(Mode::Walking);
             }
         }
     }
@@ -1358,15 +1629,15 @@ impl Pet {
     fn tick_gifting(&mut self, dt: f64) {
         let Some(mut g) = self.gift.take() else {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         };
 
         if !g.dropped {
             let tx = self.target_x;
-            let ty = self.floor_y;
+            let ty = self.target_y;
             let dx = tx - self.x;
-            let dy = ty - self.y;
+            let dy = ty - self.floor_y;
             let dist = (dx * dx + dy * dy).sqrt();
             if dist < 22.0 || self.mode_elapsed > self.mode_until {
                 // Arrive / give up — put present down.
@@ -1377,7 +1648,10 @@ impl Pet {
                 g.y = self.y + 18.0;
                 self.mode_until = 2.5;
                 self.mode_elapsed = 0.0;
+                self.floor_y = self.target_y;
                 self.y = self.floor_y;
+                self.show_bubble("给你的~♡", 2.0);
+                self.spawn_particle(ParticleKind::Heart, g.x, g.y - 20.0, 1.7);
             } else {
                 self.move_toward(tx, ty, 55.0 * self.speed_mul() * dt);
                 if dx.abs() > 8.0 {
@@ -1386,7 +1660,8 @@ impl Pet {
                 self.walk_phase = (self.walk_phase + dt * 10.0) % (std::f64::consts::TAU);
                 let dir = if self.facing >= 0.0 { 1.0 } else { -1.0 };
                 g.x = self.x + dir * 20.0;
-                g.y = self.y - 4.0 + self.walk_phase.sin() * 2.0;
+                g.y = self.floor_y - 4.0 + self.walk_phase.sin() * 2.0;
+                self.y = self.floor_y + self.walk_phase.sin() * 2.0;
             }
             self.gift = Some(g);
             return;
@@ -1399,7 +1674,7 @@ impl Pet {
             g.drop_age = 0.0; // linger clock starts when pet walks away
             self.gift = Some(g);
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
             return;
         }
         self.gift = Some(g);
@@ -1441,7 +1716,7 @@ impl Pet {
         }
         if self.mode_elapsed > self.mode_until || self.flyer.is_none() {
             self.pick_new_target();
-            self.enter(Mode::Walking);
+            self.transition(Mode::Walking);
         }
         let _ = dt;
     }
@@ -1456,6 +1731,7 @@ impl Pet {
             }
             self.mode = Mode::Startled;
             self.mode_elapsed = 0.0;
+            self.show_bubble(bubble::pick(&["啊嚏!", "啾!", "atishoo!"], fastrand_u64()), 0.9);
         }
         let _ = dt;
     }
@@ -1476,7 +1752,7 @@ impl Pet {
                     // gone
                     if self.mode == Mode::BirdWatch {
                         self.pick_new_target();
-                        self.enter(Mode::Walking);
+                        self.transition(Mode::Walking);
                     }
                     return;
                 }
@@ -1667,18 +1943,23 @@ impl Pet {
     }
 
     fn move_toward(&mut self, tx: f64, ty: f64, step: f64) {
+        // Step ground along floor_y so walk bob never accumulates into the floor.
         let dx = tx - self.x;
-        let dy = ty - self.y;
+        let dy = ty - self.floor_y;
         let d = (dx * dx + dy * dy).sqrt();
         if d < 4.0 || step <= 0.0 {
             return;
         }
         let k = (step / d).min(1.0);
         self.x += dx * k;
-        self.y += dy * k;
+        self.floor_y = (self.floor_y + dy * k).clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        self.y = self.floor_y;
+        let y_before = self.y;
         self.clamp_pos();
-        // gently update floor so after chase we don't snap
-        self.floor_y = self.y.clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        // Only re-sync floor if screen clamp actually moved y.
+        if (self.y - y_before).abs() > f64::EPSILON {
+            self.floor_y = self.y.clamp(self.screen_h * 0.55, self.screen_h * 0.85);
+        }
     }
 
     fn clamp_pos(&mut self) {
@@ -1736,18 +2017,27 @@ impl Pet {
         }
         self.x += dir * speed * dt;
         self.y = self.floor_y + self.walk_phase.sin() * 3.0;
+        if self.clock - self.last_footprint_t > 0.45 && fastrand_chance(0.35) {
+            self.last_footprint_t = self.clock;
+            self.spawn_particle(
+                ParticleKind::Footprint,
+                self.x - self.facing * 8.0,
+                self.floor_y + 22.0,
+                1.5,
+            );
+        }
 
         if (self.x - self.target_x).abs() < 4.0 {
             self.pick_new_target();
             if self.mode_elapsed > 3.5 && fastrand_chance(0.4) {
-                self.enter_idle();
+                self.transition(Mode::Idle);
             }
         }
         if self.mode_elapsed > 16.0 && fastrand_chance(0.02) {
             if fastrand_chance(0.45) {
-                self.enter(Mode::InBed);
+                self.transition(Mode::InBed);
             } else {
-                self.enter(Mode::Sleeping);
+                self.transition(Mode::Sleeping);
             }
         }
     }
@@ -1769,13 +2059,13 @@ impl Pet {
                 self.pick_idle_action();
             } else if fastrand_chance(0.35) {
                 if fastrand_chance(0.5) {
-                    self.enter(Mode::Sleeping);
+                    self.transition(Mode::Sleeping);
                 } else {
-                    self.enter(Mode::InBed);
+                    self.transition(Mode::InBed);
                 }
             } else {
                 self.pick_new_target();
-                self.enter(Mode::Walking);
+                self.transition(Mode::Walking);
             }
         }
     }
@@ -1783,70 +2073,75 @@ impl Pet {
     fn tick_sleeping(&mut self, dt: f64) {
         self.sleep_t += dt;
         self.y = self.floor_y + 8.0 + (self.sleep_t * 0.8).sin() * 0.8;
+        self.tick_sleep_fx();
         if self.mode_elapsed > 14.0 && fastrand_chance(0.02) {
-            self.enter_idle();
+            self.show_bubble("睡饱啦~", 1.5);
+            self.transition(Mode::Idle);
         }
     }
 
     fn tick_going_home(&mut self, dt: f64) {
         let dx = self.home_x - self.x;
-        let dy = self.home_y - self.y;
+        let dy = self.home_y - self.floor_y;
         let dist = (dx * dx + dy * dy).sqrt();
         if dist < 8.0 || self.mode_elapsed > self.mode_until {
             self.x = self.home_x;
             self.y = self.home_y;
             self.floor_y = self.home_y;
-            self.enter(Mode::InBed);
+            self.transition(Mode::InBed);
             return;
         }
         let speed = 55.0 * self.species.speed(); // ~px/s
         let step = (speed * dt).min(dist);
         self.x += dx / dist * step;
-        self.y += dy / dist * step;
+        self.floor_y += dy / dist * step;
         if dx.abs() > 2.0 {
             self.facing = if dx > 0.0 { 1.0 } else { -1.0 };
         }
         self.walk_phase = (self.walk_phase + dt * 9.0) % std::f64::consts::TAU;
-        // Bob relative to the lerp path (y already stepped toward home).
-        self.y += self.walk_phase.sin() * 2.0;
+        // Align with Walking: bob on top of stable ground, never accumulate into floor.
+        self.y = self.floor_y + self.walk_phase.sin() * 2.0;
     }
 
     fn tick_in_bed(&mut self, dt: f64) {
         self.sleep_t += dt;
         self.y = self.floor_y + 4.0 + (self.sleep_t * 0.7).sin() * 0.6;
+        self.tick_sleep_fx();
         if self.mode_elapsed > 22.0 && fastrand_chance(0.01) {
-            self.enter_idle();
+            self.show_bubble("睡饱啦~", 1.5);
+            self.transition(Mode::Idle);
         }
     }
 
-    fn enter_idle(&mut self) {
-        self.mode = Mode::Idle;
-        self.mode_elapsed = 0.0;
-        self.idle_t = 0.0;
-        self.pick_idle_action();
+    fn tick_sleep_fx(&mut self) {
+        if self.clock - self.last_zzz_bubble_t > 5.5 {
+            self.last_zzz_bubble_t = self.clock;
+            self.show_bubble(bubble::pick_sleepy(fastrand_u64()), 2.2);
+        }
+        if fastrand_chance(0.03) {
+            self.spawn_particle(
+                ParticleKind::Zzz,
+                self.x + 20.0 + ((fastrand_u64() % 16) as f64),
+                self.y - 28.0,
+                2.2,
+            );
+        }
+        if self.clock - self.last_dream_t > 8.0 && fastrand_chance(0.01) {
+            self.last_dream_t = self.clock;
+            let food = match self.species {
+                Species::Cat => "🐟",
+                Species::Pig => "🥕",
+                Species::Bear => "🍯",
+            };
+            self.particles.push(
+                Particle::new(ParticleKind::Dream, self.x + 12.0, self.y - 40.0, 2.6)
+                    .with_label(food),
+            );
+        }
     }
 
-    fn enter_interested(&mut self) {
-        self.mode = Mode::Interested;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 3.0 + (fastrand_u64() % 2500) as f64 / 1000.0;
-        self.interested_jitter = (fastrand_u64() % 628) as f64 / 100.0;
-    }
-
-    fn enter_watching(&mut self) {
-        self.mode = Mode::Watching;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 0.9 + (fastrand_u64() % 900) as f64 / 1000.0;
-    }
-
-    fn enter_chasing(&mut self) {
-        self.mode = Mode::Chasing;
-        self.mode_elapsed = 0.0;
-        self.mode_until = 2.2 + (fastrand_u64() % 1800) as f64 / 1000.0;
-        self.chase_t = 0.0;
-    }
-
-    fn enter(&mut self, mode: Mode) {
+    /// Single mode-switch entry: resets timers; callers may override `mode_until`.
+    fn transition(&mut self, mode: Mode) {
         self.mode = mode;
         self.mode_elapsed = 0.0;
         match mode {
@@ -1859,19 +2154,30 @@ impl Pet {
             }
             Mode::Sleeping | Mode::InBed => {
                 self.sleep_t = 0.0;
+                self.show_bubble(bubble::pick_sleepy(fastrand_u64()), 2.2);
+                self.last_zzz_bubble_t = self.clock;
             }
             Mode::Dizzy => {
                 self.dizzy_t = 0.0;
             }
             Mode::Interested => {
-                self.mode_until = 4.0;
+                self.mode_until = 3.0 + (fastrand_u64() % 2500) as f64 / 1000.0;
+                self.interested_jitter = (fastrand_u64() % 628) as f64 / 100.0;
             }
             Mode::Watching => {
-                self.mode_until = 1.2;
+                self.mode_until = 0.9 + (fastrand_u64() % 900) as f64 / 1000.0;
             }
             Mode::Chasing => {
-                self.mode_until = 3.0;
+                self.mode_until = 2.2 + (fastrand_u64() % 1800) as f64 / 1000.0;
                 self.chase_t = 0.0;
+            }
+            Mode::Clingy => {
+                self.clingy_arrived = false;
+                self.mode_until = 9.0;
+            }
+            Mode::Pet => {}
+            Mode::Photo => {
+                self.photo_t = 0.0;
             }
             _ => {}
         }
@@ -1891,32 +2197,193 @@ impl Pet {
                 1.0
             };
         }
+        if let Some(text) = bubble::idle_start_bubble(self.idle_action, self.species) {
+            self.show_bubble(text, 1.4);
+        }
+        if self.idle_action == IdleAction::MudRoll {
+            for _ in 0..3 {
+                self.spawn_particle(
+                    ParticleKind::Mud,
+                    self.x + ((fastrand_u64() % 30) as f64 - 15.0),
+                    self.y + 10.0,
+                    0.7,
+                );
+            }
+        }
     }
 
     fn pick_new_target(&mut self) {
         let margin = Self::SIZE;
         let lo = margin;
         let hi = (self.screen_w - margin).max(lo + 1.0);
-        let t = ((self.x * 12.9898 + self.y * 78.233).sin() * 43758.5453).fract().abs();
-        self.target_x = lo + t * (hi - lo);
+        const MIN_DIST: f64 = 48.0;
+        for _ in 0..12 {
+            let t = (fastrand_u64() as f64) / (u64::MAX as f64);
+            let tx = lo + t * (hi - lo);
+            if (tx - self.x).abs() >= MIN_DIST {
+                self.target_x = tx;
+                return;
+            }
+        }
+        // Fallback: flip to the far side so we never "arrive" immediately.
+        self.target_x = if self.x < (lo + hi) * 0.5 { hi } else { lo };
     }
 }
 
+
 fn fastrand_u64() -> u64 {
-    use std::cell::Cell;
-    thread_local! {
-        static S: Cell<u64> = Cell::new(0xC0FFEE_u64);
-    }
-    S.with(|s| {
-        let mut x = s.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        s.set(x);
-        x
-    })
+    rng::next_u64()
 }
 
 fn fastrand_chance(p: f64) -> bool {
     (fastrand_u64() as f64) / (u64::MAX as f64) < p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_still_decays_move_amt() {
+        rng::seed(1);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.clock = 0.0;
+        pet.note_cursor(Some((100.0, 100.0)));
+        pet.clock = 0.05;
+        pet.note_cursor(Some((250.0, 100.0)));
+        assert!(
+            pet.cursor_move_amt > 60.0,
+            "expected motion, got {}",
+            pet.cursor_move_amt
+        );
+        // Hold still past the 1.5s trail window — amt must decay to ~0.
+        for i in 0..20 {
+            pet.clock = 0.05 + i as f64 * 0.2;
+            pet.note_cursor(Some((250.0, 100.0)));
+        }
+        assert!(
+            pet.cursor_move_amt < 1.0,
+            "stationary cursor should decay amt, got {}",
+            pet.cursor_move_amt
+        );
+    }
+
+    #[test]
+    fn going_home_reaches_home_x() {
+        rng::seed(2);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.x = pet.home_x - 180.0;
+        pet.floor_y = pet.home_y;
+        pet.y = pet.floor_y;
+        pet.go_to_bed();
+        assert_eq!(pet.mode, Mode::GoingHome);
+        for _ in 0..900 {
+            pet.update(1.0 / 60.0);
+            if pet.mode == Mode::InBed {
+                break;
+            }
+        }
+        assert_eq!(pet.mode, Mode::InBed);
+        assert!(
+            (pet.x - pet.home_x).abs() < 1.0,
+            "x={} home={}",
+            pet.x,
+            pet.home_x
+        );
+        assert!((pet.floor_y - pet.home_y).abs() < 1.0);
+    }
+
+    #[test]
+    fn gifting_does_not_teleport_floor_y() {
+        rng::seed(3);
+        let mut pet = Pet::new(1440.0, 900.0);
+        let floor0 = pet.floor_y;
+        // High cursor used to rewrite floor_y immediately in start_gifting.
+        pet.cursor = Some((800.0, 80.0));
+        pet.start_gifting();
+        assert_eq!(pet.mode, Mode::Gifting);
+        assert!(
+            (pet.floor_y - floor0).abs() < 0.01,
+            "floor teleported from {floor0} to {}",
+            pet.floor_y
+        );
+    }
+
+    #[test]
+    fn clingy_bob_does_not_drift_floor() {
+        rng::seed(4);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.cursor = Some((pet.x + 400.0, pet.floor_y));
+        pet.start_clingy();
+        pet.target_y = pet.floor_y; // horizontal approach
+        let floor0 = pet.floor_y;
+        for _ in 0..90 {
+            pet.update(1.0 / 60.0);
+            if matches!(pet.mode, Mode::Clingy) && !pet.clingy_arrived {
+                // Bob lives in y, not floor.
+                assert!(
+                    (pet.y - pet.floor_y).abs() <= 2.01,
+                    "y={} floor={}",
+                    pet.y,
+                    pet.floor_y
+                );
+            }
+        }
+        assert!(
+            (pet.floor_y - floor0).abs() < 0.5,
+            "floor drifted by {}",
+            pet.floor_y - floor0
+        );
+    }
+
+    #[test]
+    fn pick_new_target_rejects_near() {
+        rng::seed(5);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.x = 400.0;
+        for _ in 0..30 {
+            pet.pick_new_target();
+            assert!(
+                (pet.target_x - pet.x).abs() >= 48.0 - 1e-6,
+                "target {} too close to x={}",
+                pet.target_x,
+                pet.x
+            );
+        }
+    }
+
+    #[test]
+    fn show_bubble_expires() {
+        rng::seed(6);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.show_bubble("喵~", 0.5);
+        assert!(pet.bubble.is_some());
+        for _ in 0..40 {
+            pet.update(1.0 / 60.0);
+        }
+        assert!(pet.bubble.is_none(), "bubble should expire");
+    }
+
+    #[test]
+    fn short_click_enters_trick() {
+        rng::seed(7);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.mode = Mode::Idle;
+        pet.on_short_click();
+        assert_eq!(pet.mode, Mode::Trick);
+        assert!(pet.trick_action.is_some());
+        assert!(
+            pet.bubble.is_some()
+                || matches!(
+                    pet.trick_action,
+                    Some(
+                        TrickAction::Spin
+                            | TrickAction::Pounce
+                            | TrickAction::HappyJump
+                            | TrickAction::SwatCursor
+                    )
+                ),
+            "meow/heart/etc should speak; silent actions ok"
+        );
+    }
 }

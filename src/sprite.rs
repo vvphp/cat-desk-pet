@@ -7,19 +7,19 @@
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::TAU;
 
-/// Max cached rasters (~94KB each at 160×147). Walking creates many pose keys.
+/// Max cached rasters (~53KB each at 120×110). Walking creates many pose keys.
 const MAX_CACHE: usize = 48;
 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{Options, Tree};
 
-use crate::pet::{CoatColor, IdleAction, Mode, Pet, Species};
+use crate::pet::{CoatColor, IdleAction, Mode, Pet, Species, TrickAction};
 
 const PET_SVG: &str = include_str!("../assets/pet.svg");
 
-/// Logical sprite size inside the WIN×WIN canvas (matches SVG 120×110 aspect).
-pub const SPRITE_W: u32 = 160;
-pub const SPRITE_H: u32 = 147;
+/// Logical sprite size — matches WebView `#cat` (120×110 CSS px).
+pub const SPRITE_W: u32 = 120;
+pub const SPRITE_H: u32 = 110;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct SpriteKey {
@@ -191,6 +191,33 @@ fn pose_for(pet: &Pet) -> AnimPose {
             leg_fl: 0.0,
             leg_fr: 0.0,
         },
+        Mode::Trick => match pet.trick_action.unwrap_or(TrickAction::Meow) {
+            TrickAction::Spin => AnimPose {
+                tail_deg: (pet.walk_phase * 3.0).sin() * 28.0,
+                leg_fl: -2.0,
+                leg_fr: -2.0,
+            },
+            TrickAction::Pounce | TrickAction::HappyJump | TrickAction::SwatCursor => AnimPose {
+                tail_deg: 16.0,
+                leg_fl: -3.0,
+                leg_fr: -3.0,
+            },
+            TrickAction::Grumpy => AnimPose {
+                tail_deg: -12.0,
+                leg_fl: 1.0,
+                leg_fr: 1.0,
+            },
+            TrickAction::Heart | TrickAction::Kiss => AnimPose {
+                tail_deg: (pet.walk_phase * 4.0).sin() * 18.0,
+                leg_fl: 0.0,
+                leg_fr: 0.0,
+            },
+            _ => AnimPose {
+                tail_deg: (pet.walk_phase * 3.0).sin() * 14.0,
+                leg_fl: 0.0,
+                leg_fr: 0.0,
+            },
+        },
     }
 }
 
@@ -260,6 +287,15 @@ fn eyes_for(pet: &Pet) -> EyeStyle {
         Mode::Feeding if pet.eat_anim_t > 0.0 => EyeStyle::Happy,
         Mode::Gifting if pet.gift.as_ref().map(|g| g.dropped).unwrap_or(false) => EyeStyle::Happy,
         Mode::Dragged => EyeStyle::Wide,
+        Mode::Trick => match pet.trick_action {
+            Some(TrickAction::Heart | TrickAction::Kiss) => EyeStyle::Hearts,
+            Some(TrickAction::Grumpy) => EyeStyle::X,
+            Some(TrickAction::Shy) => EyeStyle::Happy,
+            Some(TrickAction::Pounce | TrickAction::HappyJump | TrickAction::SwatCursor) => {
+                EyeStyle::Wide
+            }
+            _ => EyeStyle::Happy,
+        },
         _ => EyeStyle::Normal,
     }
 }
@@ -549,10 +585,11 @@ fn rasterize(key: SpriteKey) -> Option<Vec<u32>> {
     let opt = Options::default();
     let tree = Tree::from_str(&svg, &opt).ok()?;
     let mut pixmap = Pixmap::new(SPRITE_W, SPRITE_H)?;
-    // Fit viewBox 120×110 into SPRITE_W×SPRITE_H.
-    let sx = SPRITE_W as f32 / 120.0;
-    let sy = SPRITE_H as f32 / 110.0;
-    let ts = Transform::from_scale(sx, sy);
+    // SVG viewBox is 120×110 — 1:1 with WebView cat size.
+    let ts = Transform::from_scale(
+        SPRITE_W as f32 / 120.0,
+        SPRITE_H as f32 / 110.0,
+    );
     resvg::render(&tree, ts, &mut pixmap.as_mut());
 
     let mut out = Vec::with_capacity((SPRITE_W * SPRITE_H) as usize);
@@ -586,15 +623,14 @@ pub fn blit_sprite(
     sprite: &[u32],
     facing: f64,
     bob: f64,
-    off_x: f64,
-    off_y: f64,
+    dest_cx: f64,
+    dest_cy: f64,
 ) {
     if sprite.len() < (SPRITE_W * SPRITE_H) as usize {
         return;
     }
     let flip = facing < 0.0;
-    let dest_cx = win_w as f64 * 0.5 + off_x;
-    let dest_cy = win_h as f64 * 0.55 + bob + off_y;
+    let dest_cy = dest_cy + bob;
     let left = (dest_cx - SPRITE_W as f64 * 0.5).round() as i32;
     let top = (dest_cy - SPRITE_H as f64 * 0.55).round() as i32;
 

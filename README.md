@@ -1,8 +1,8 @@
 <div align="center">
 
-![Cat Desk Pet](docs/banner.png)
+![摸鱼猫](docs/banner.png)
 
-# 🐾 Cat Desk Pet
+# 🐾 摸鱼猫
 
 **简体中文** · [English](README.en.md)
 
@@ -23,7 +23,7 @@
 
 | 平台 | 文件 |
 |---|---|
-| macOS | `CatDeskPet.dmg`（通用包） |
+| macOS | `摸鱼猫.dmg`（通用包） |
 | Windows | `cat-desk-pet.exe` |
 
 未签名属正常：macOS 右键打开；Windows SmartScreen → Run anyway。  
@@ -38,7 +38,7 @@ git clone https://github.com/vvphp/cat-desk-pet
 cd cat-desk-pet
 cargo run --release          # 或 npm run dev
 ./tools/run-pet.sh           # 后台脱离终端
-./tools/package-macos.sh     # → dist/macos/CatDeskPet.app + .dmg
+./tools/package-macos.sh     # → dist/macos/摸鱼猫.app + .dmg
 ```
 
 打 tag 发版：`git tag v1.0.0 && git push origin v1.0.0`（见 `.github/workflows/release.yml`）。
@@ -55,7 +55,7 @@ cargo run --release          # 或 npm run dev
  SVG（assets/pet.svg）→ resvg 栅格 → CALayer / softbuffer 提交
       ▲
       │
- Rust 行为状态机（src/pet.rs）
+ Rust 行为状态机（src/pet/）
 ```
 
 - macOS：自管 CALayer 透明提交（绕过 softbuffer 丢 alpha）
