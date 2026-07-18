@@ -1,0 +1,1009 @@
+//! Cat Desk Pet — native small-window pet (issue #2 Phase 3). No WebView.
+//!
+//! From repo root:
+//!   npm run dev
+//!   npm run build
+//! Or:
+//!   cargo run --release --manifest-path native-spike/Cargo.toml
+
+mod pet;
+mod render;
+mod sprite;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(not(target_os = "macos"))]
+use std::num::NonZeroU32;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use pet::{CoatColor, ForceScene, Mode, Pet, Species, ToyKind};
+use render::WIN;
+use sprite::SpriteCache;
+#[cfg(not(target_os = "macos"))]
+use softbuffer::{Context, Surface};
+use tray_icon::menu::{
+    ContextMenu, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+};
+use tray_icon::{Icon, TrayIconBuilder};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
+use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{Window, WindowId, WindowLevel};
+
+#[derive(Debug)]
+enum UserEvent {
+    MenuEvent(tray_icon::menu::MenuEvent),
+}
+
+/// Left-button press before we know drag vs pet (mirrors WebView `state.press`).
+struct PressState {
+    t0: Instant,
+    /// Desktop logical coords at press.
+    desk_x: f64,
+    desk_y: f64,
+    dragging: bool,
+    petting: bool,
+}
+
+struct App {
+    window: Option<Rc<Window>>,
+    #[cfg(not(target_os = "macos"))]
+    context: Option<Context<Rc<Window>>>,
+    #[cfg(not(target_os = "macos"))]
+    surface: Option<Surface<Rc<Window>, Rc<Window>>>,
+    pet: Pet,
+    sprites: SpriteCache,
+    /// Logical WIN×WIN canvas (straight ARGB).
+    pixels: Vec<u32>,
+    /// Physical buffer for Retina upscale / present.
+    present_buf: Vec<u32>,
+    last_tick: Instant,
+    next_frame: Instant,
+    _tray: Option<tray_icon::TrayIcon>,
+    /// Shared tray + right-click menu (Clone / Rc internally).
+    ctx_menu: Option<Menu>,
+    _submenus: Option<Vec<Submenu>>,
+    _menu_items: Option<Vec<MenuItem>>,
+    quit_id: Option<tray_icon::menu::MenuId>,
+    toggle_id: Option<tray_icon::menu::MenuId>,
+    sleep_id: Option<tray_icon::menu::MenuId>,
+    bed_id: Option<tray_icon::menu::MenuId>,
+    feed_id: Option<tray_icon::menu::MenuId>,
+    yarn_id: Option<tray_icon::menu::MenuId>,
+    ball_id: Option<tray_icon::menu::MenuId>,
+    paper_id: Option<tray_icon::menu::MenuId>,
+    mouse_id: Option<tray_icon::menu::MenuId>,
+    laser_id: Option<tray_icon::menu::MenuId>,
+    wand_id: Option<tray_icon::menu::MenuId>,
+    cancel_toy_id: Option<tray_icon::menu::MenuId>,
+    bird_id: Option<tray_icon::menu::MenuId>,
+    butterfly_id: Option<tray_icon::menu::MenuId>,
+    photo_id: Option<tray_icon::menu::MenuId>,
+    gift_id: Option<tray_icon::menu::MenuId>,
+    clingy_id: Option<tray_icon::menu::MenuId>,
+    color_ids: Vec<(tray_icon::menu::MenuId, CoatColor)>,
+    species_ids: Vec<(tray_icon::menu::MenuId, Species)>,
+    hidden: bool,
+    cursor_local: Option<(f64, f64)>,
+    ignore_mouse: bool,
+    drag_grab: Option<(f64, f64)>, // offset from pet center while dragging
+    press: Option<PressState>,
+    scale: f64,
+    /// Committed OS window top-left (logical). May lag `pet` while walking;
+    /// sprite is drawn with a compensating in-window offset.
+    last_win_pos: Option<(f64, f64)>,
+    last_win_move: Instant,
+    last_passthrough: Instant,
+    draw_off: (f64, f64),
+}
+
+/// How far (logical px) the pet may drift inside the window before we move the OS window.
+const WIN_MOVE_THRESHOLD: f64 = 6.0;
+/// Cap OS window moves even while walking (~12 Hz).
+const WIN_MOVE_MIN_INTERVAL: Duration = Duration::from_millis(80);
+
+impl App {
+    fn new(screen_w: f64, screen_h: f64) -> Self {
+        let now = Instant::now();
+        Self {
+            window: None,
+            #[cfg(not(target_os = "macos"))]
+            context: None,
+            #[cfg(not(target_os = "macos"))]
+            surface: None,
+            pet: Pet::new(screen_w, screen_h),
+            sprites: SpriteCache::new(),
+            pixels: vec![0; (WIN * WIN) as usize],
+            present_buf: Vec::new(),
+            last_tick: now,
+            next_frame: now,
+            _tray: None,
+            ctx_menu: None,
+            _submenus: None,
+            _menu_items: None,
+            quit_id: None,
+            toggle_id: None,
+            sleep_id: None,
+            bed_id: None,
+            feed_id: None,
+            yarn_id: None,
+            ball_id: None,
+            paper_id: None,
+            mouse_id: None,
+            laser_id: None,
+            wand_id: None,
+            cancel_toy_id: None,
+            bird_id: None,
+            butterfly_id: None,
+            photo_id: None,
+            gift_id: None,
+            clingy_id: None,
+            color_ids: Vec::new(),
+            species_ids: Vec::new(),
+            hidden: false,
+            cursor_local: None,
+            ignore_mouse: true,
+            drag_grab: None,
+            press: None,
+            scale: 1.0,
+            last_win_pos: None,
+            last_win_move: now,
+            last_passthrough: now,
+            draw_off: (0.0, 0.0),
+        }
+    }
+
+    fn desired_win_pos(&self) -> (f64, f64) {
+        let half = WIN as f64 * 0.5;
+        (
+            (self.pet.x - half).round(),
+            (self.pet.y - half).round(),
+        )
+    }
+
+    /// Commit OS window position sparingly; keep `draw_off` so the sprite stays on-screen.
+    fn sync_window_pos(&mut self, force: bool) {
+        let Some(window) = &self.window else { return };
+        let (lx, ly) = self.desired_win_pos();
+        let now = Instant::now();
+
+        let should_move = force
+            || match self.last_win_pos {
+                None => true,
+                Some((ox, oy)) => {
+                    let far = (ox - lx).abs() >= WIN_MOVE_THRESHOLD
+                        || (oy - ly).abs() >= WIN_MOVE_THRESHOLD;
+                    let due = now.duration_since(self.last_win_move) >= WIN_MOVE_MIN_INTERVAL;
+                    // Move when we've drifted enough AND the min interval has passed,
+                    // or when drift is large (>2× threshold) to avoid visible clip.
+                    let very_far = (ox - lx).abs() >= WIN_MOVE_THRESHOLD * 2.0
+                        || (oy - ly).abs() >= WIN_MOVE_THRESHOLD * 2.0;
+                    (far && due) || very_far || self.pet.dragging
+                }
+            };
+
+        if should_move {
+            let _ = window.set_outer_position(LogicalPosition::new(lx, ly));
+            self.last_win_pos = Some((lx, ly));
+            self.last_win_move = now;
+            self.draw_off = (0.0, 0.0);
+        } else if let Some((ox, oy)) = self.last_win_pos {
+            // Logical pet moved; keep it visually correct via in-buffer offset
+            // (logical px — drawing always happens on a WIN×WIN logical canvas).
+            self.draw_off = (lx - ox, ly - oy);
+        }
+    }
+
+    fn redraw(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        let size = window.inner_size();
+        let pw = size.width.max(1);
+        let ph = size.height.max(1);
+
+        // Always paint in logical WIN×WIN space, then nearest-neighbor upscale
+        // to physical pixels. Otherwise Retina (2×) makes the pet a tiny blob.
+        let need = (WIN * WIN) as usize;
+        if self.pixels.len() != need {
+            self.pixels.resize(need, 0);
+        }
+
+        let (ox, oy) = self.draw_off;
+        render::draw_pet(
+            &mut self.pixels,
+            WIN,
+            WIN,
+            &self.pet,
+            ox,
+            oy,
+            &mut self.sprites,
+        );
+
+        let phys = (pw as usize).saturating_mul(ph as usize);
+        if self.present_buf.len() != phys {
+            self.present_buf.resize(phys, 0);
+        }
+        if pw != WIN || ph != WIN {
+            blit_nn(&self.pixels, WIN, WIN, &mut self.present_buf, pw, ph);
+        } else {
+            self.present_buf.copy_from_slice(&self.pixels[..need]);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            macos::present_argb(&window, &self.present_buf, pw, ph);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let Some(surface) = &mut self.surface else {
+                return;
+            };
+            if let (Some(nw), Some(nh)) = (NonZeroU32::new(pw), NonZeroU32::new(ph)) {
+                let _ = surface.resize(nw, nh);
+            }
+            if let Ok(mut buffer) = surface.buffer_mut() {
+                let n = buffer.len().min(self.present_buf.len());
+                buffer[..n].copy_from_slice(&self.present_buf[..n]);
+                let _ = buffer.present();
+            }
+        }
+    }
+
+    fn cursor_logical_in_window(&self) -> Option<(f64, f64)> {
+        let (px, py) = self.cursor_local?;
+        let scale = self.scale.max(0.01);
+        Some((px / scale, py / scale))
+    }
+
+    fn passthrough_interval(&self) -> Duration {
+        match self.pet.mode {
+            Mode::Sleeping | Mode::InBed => Duration::from_millis(100),
+            Mode::Idle | Mode::Dizzy | Mode::Pet | Mode::Watching | Mode::BirdWatch => {
+                Duration::from_millis(66)
+            }
+            Mode::Walking
+            | Mode::GoingHome
+            | Mode::Clingy
+            | Mode::Interested
+            | Mode::Feeding
+            | Mode::ButterflyNose
+            | Mode::Photo
+            | Mode::Gifting => Duration::from_millis(50),
+            Mode::Dragged | Mode::Chasing | Mode::Playing | Mode::Startled => {
+                Duration::from_millis(33)
+            }
+        }
+    }
+
+    fn desk_from_cursor_local(&self, lx: f64, ly: f64) -> Option<(f64, f64)> {
+        let window = self.window.as_ref()?;
+        let outer = window
+            .outer_position()
+            .unwrap_or(PhysicalPosition::new(0, 0));
+        let scale = window.scale_factor().max(0.01);
+        Some((outer.x as f64 / scale + lx, outer.y as f64 / scale + ly))
+    }
+
+    /// Promote long-press → pet, or move → drag (WebView press semantics).
+    fn tick_press(&mut self) {
+        let Some(press) = self.press.as_mut() else {
+            return;
+        };
+        if press.dragging || press.petting {
+            return;
+        }
+        if press.t0.elapsed() >= Duration::from_millis(500) {
+            press.petting = true;
+            self.pet.start_pet();
+            self.next_frame = Instant::now();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    fn feed_cursor(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            self.pet.note_cursor(macos::cursor_logical_top_left());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.pet.note_cursor(None);
+        }
+    }
+
+    fn update_passthrough(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let now = Instant::now();
+            if !self.pet.dragging
+                && now.duration_since(self.last_passthrough) < self.passthrough_interval()
+            {
+                return;
+            }
+            self.last_passthrough = now;
+
+            let Some(window) = &self.window else { return };
+            if self.pet.dragging {
+                if self.ignore_mouse {
+                    self.ignore_mouse = false;
+                    macos::set_ignore_mouse(window, false);
+                }
+                return;
+            }
+            // When ignoresMouseEvents is on, the window gets no CursorMoved —
+            // poll global cursor and hit-test against the pet's desktop ellipse.
+            let over = macos::cursor_logical_top_left()
+                .map(|(cx, cy)| {
+                    let dx = cx - self.pet.x;
+                    let dy = cy - self.pet.y;
+                    (dx * dx) / (52.0 * 52.0) + (dy * dy) / (44.0 * 44.0) <= 1.0
+                })
+                .unwrap_or(false);
+            let want_ignore = !over;
+            if want_ignore != self.ignore_mouse {
+                self.ignore_mouse = want_ignore;
+                macos::set_ignore_mouse(window, want_ignore);
+            }
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::Init) {
+            #[cfg(target_os = "macos")]
+            macos::set_accessory_policy();
+
+            // Tray + right-click menu aligned with WebView ctx-menu.
+            let menu = Menu::new();
+            let mut items: Vec<MenuItem> = Vec::new();
+            let mut submenus: Vec<Submenu> = Vec::new();
+
+            // --- 🐾 动物 ---
+            self.species_ids.clear();
+            let mut species_items: Vec<MenuItem> = Vec::new();
+            for sp in Species::all() {
+                let item = MenuItem::new(sp.label(), true, None);
+                self.species_ids.push((item.id().clone(), *sp));
+                species_items.push(item);
+            }
+            let species_refs: Vec<&dyn IsMenuItem> = species_items
+                .iter()
+                .map(|i| i as &dyn IsMenuItem)
+                .collect();
+            let species_menu =
+                Submenu::with_items("🐾 动物", true, &species_refs).expect("species submenu");
+
+            // --- 🎨 毛色 ---
+            self.color_ids.clear();
+            let mut color_items: Vec<MenuItem> = Vec::new();
+            for coat in CoatColor::all() {
+                let item = MenuItem::new(coat.label(), true, None);
+                self.color_ids.push((item.id().clone(), *coat));
+                color_items.push(item);
+            }
+            let color_refs: Vec<&dyn IsMenuItem> =
+                color_items.iter().map(|i| i as &dyn IsMenuItem).collect();
+            let color_menu =
+                Submenu::with_items("🎨 毛色", true, &color_refs).expect("color submenu");
+
+            // --- 🎮 互动 ---
+            let feed = MenuItem::new("🍴 投食", true, None);
+            let sleep = MenuItem::new("💤 让她睡一下", true, None);
+            let bed = MenuItem::new("🏠 回窝睡觉", true, None);
+            let photo = MenuItem::new("📸 拍照模式", true, None);
+            self.feed_id = Some(feed.id().clone());
+            self.sleep_id = Some(sleep.id().clone());
+            self.bed_id = Some(bed.id().clone());
+            self.photo_id = Some(photo.id().clone());
+            let interact_menu = Submenu::with_items(
+                "🎮 互动",
+                true,
+                &[
+                    &feed as &dyn IsMenuItem,
+                    &sleep as &dyn IsMenuItem,
+                    &bed as &dyn IsMenuItem,
+                    &photo as &dyn IsMenuItem,
+                ],
+            )
+            .expect("interact submenu");
+
+            // --- 🧸 玩具 ---
+            let yarn = MenuItem::new("🧶 毛线球", true, None);
+            let ball = MenuItem::new("⚽ 弹力球", true, None);
+            let paper = MenuItem::new("📄 纸团", true, None);
+            let mouse = MenuItem::new("🐭 假老鼠", true, None);
+            let laser = MenuItem::new("🔴 激光笔", true, None);
+            let wand = MenuItem::new("🪶 逗猫棒", true, None);
+            let cancel_toy = MenuItem::new("❌ 收起玩具", true, None);
+            self.yarn_id = Some(yarn.id().clone());
+            self.ball_id = Some(ball.id().clone());
+            self.paper_id = Some(paper.id().clone());
+            self.mouse_id = Some(mouse.id().clone());
+            self.laser_id = Some(laser.id().clone());
+            self.wand_id = Some(wand.id().clone());
+            self.cancel_toy_id = Some(cancel_toy.id().clone());
+            let toy_menu = Submenu::with_items(
+                "🧸 玩具",
+                true,
+                &[
+                    &yarn as &dyn IsMenuItem,
+                    &ball as &dyn IsMenuItem,
+                    &paper as &dyn IsMenuItem,
+                    &mouse as &dyn IsMenuItem,
+                    &laser as &dyn IsMenuItem,
+                    &wand as &dyn IsMenuItem,
+                    &cancel_toy as &dyn IsMenuItem,
+                ],
+            )
+            .expect("toy submenu");
+
+            // --- ✨ 更多（spike 额外；WebView 右键无此项）---
+            let toggle = MenuItem::new("隐藏 / 显示宠物", true, None);
+            let clingy = MenuItem::new("💕 过来撒娇", true, None);
+            let gift = MenuItem::new("🎁 送你礼物", true, None);
+            let bird = MenuItem::new("🐦 小鸟飞过", true, None);
+            let butterfly = MenuItem::new("🦋 蝴蝶落鼻", true, None);
+            self.toggle_id = Some(toggle.id().clone());
+            self.clingy_id = Some(clingy.id().clone());
+            self.gift_id = Some(gift.id().clone());
+            self.bird_id = Some(bird.id().clone());
+            self.butterfly_id = Some(butterfly.id().clone());
+            let more_menu = Submenu::with_items(
+                "✨ 更多",
+                true,
+                &[
+                    &toggle as &dyn IsMenuItem,
+                    &clingy as &dyn IsMenuItem,
+                    &gift as &dyn IsMenuItem,
+                    &bird as &dyn IsMenuItem,
+                    &butterfly as &dyn IsMenuItem,
+                ],
+            )
+            .expect("more submenu");
+
+            let quit = MenuItem::new("退出", true, None);
+            self.quit_id = Some(quit.id().clone());
+            let sep = PredefinedMenuItem::separator();
+
+            let _ = menu.append(&species_menu);
+            let _ = menu.append(&color_menu);
+            let _ = menu.append(&interact_menu);
+            let _ = menu.append(&toy_menu);
+            let _ = menu.append(&more_menu);
+            let _ = menu.append(&sep);
+            let _ = menu.append(&quit);
+
+            items.extend(species_items);
+            items.extend(color_items);
+            items.push(feed);
+            items.push(sleep);
+            items.push(bed);
+            items.push(photo);
+            items.push(yarn);
+            items.push(ball);
+            items.push(paper);
+            items.push(mouse);
+            items.push(laser);
+            items.push(wand);
+            items.push(cancel_toy);
+            items.push(toggle);
+            items.push(clingy);
+            items.push(gift);
+            items.push(bird);
+            items.push(butterfly);
+            items.push(quit);
+            submenus.push(species_menu);
+            submenus.push(color_menu);
+            submenus.push(interact_menu);
+            submenus.push(toy_menu);
+            submenus.push(more_menu);
+
+            self._menu_items = Some(items);
+            self._submenus = Some(submenus);
+            self.ctx_menu = Some(menu.clone());
+
+            let icon = tray_icon_from_orange();
+            let tray = TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                .with_tooltip("Cat Desk Pet")
+                .with_icon(icon)
+                .build()
+                .ok();
+            self._tray = tray;
+        }
+
+        let now = Instant::now();
+        if now >= self.next_frame {
+            let dt = now.duration_since(self.last_tick).as_secs_f64().min(0.1);
+            self.last_tick = now;
+            self.feed_cursor();
+            self.tick_press();
+            self.pet.update(dt);
+            self.sync_window_pos(false);
+            self.update_passthrough();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            self.next_frame = now + self.pet.mode.frame_interval();
+        } else {
+            // Refresh passthrough between paint frames so wake/click stays responsive.
+            self.update_passthrough();
+        }
+        // Wake for the sooner of next paint or next passthrough poll.
+        let poll_at = self.last_passthrough + self.passthrough_interval();
+        let wake_at = if self.next_frame < poll_at {
+            self.next_frame
+        } else {
+            poll_at
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at.max(now)));
+
+        // Drain menu events (also delivered as UserEvent when proxy works).
+        while let Ok(ev) = MenuEvent::receiver().try_recv() {
+            self.handle_menu(&ev, event_loop);
+        }
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        if let Some(monitor) = event_loop.primary_monitor() {
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            self.pet
+                .set_screen(size.width as f64 / scale, size.height as f64 / scale);
+        }
+
+        let attrs = Window::default_attributes()
+            .with_title("Cat Desk Pet")
+            .with_inner_size(LogicalSize::new(WIN, WIN))
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_resizable(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_visible(true);
+
+        let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        self.scale = window.scale_factor();
+
+        #[cfg(target_os = "macos")]
+        {
+            macos::configure_transparent(&window);
+            macos::set_ignore_mouse(&window, true);
+            self.ignore_mouse = true;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let context = Context::new(window.clone()).expect("softbuffer context");
+            let surface = Surface::new(&context, window.clone()).expect("softbuffer surface");
+            self.context = Some(context);
+            self.surface = Some(surface);
+        }
+
+        self.window = Some(window);
+        self.sync_window_pos(true);
+        self.redraw();
+        // Accessory (no Dock) — force above other windows so the pet is findable.
+        #[cfg(target_os = "macos")]
+        if let Some(w) = &self.window {
+            macos::order_front(w);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _id: WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            // Tray app: Cmd+W / system close must NOT quit — only hide.
+            WindowEvent::CloseRequested => {
+                self.set_pet_visible(false);
+            }
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+                self.update_passthrough();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self.scale.max(0.01);
+                let lx = position.x / scale;
+                let ly = position.y / scale;
+                self.cursor_local = Some((position.x, position.y));
+
+                // Promote press → drag if moved > 8 logical px (WebView threshold).
+                let desk = self.desk_from_cursor_local(lx, ly);
+                let promote = self.press.as_ref().is_some_and(|p| {
+                    !p.dragging
+                        && !p.petting
+                        && desk.is_some_and(|(dx, dy)| {
+                            ((dx - p.desk_x).powi(2) + (dy - p.desk_y).powi(2)).sqrt() > 8.0
+                        })
+                });
+                if promote {
+                    if let Some(press) = self.press.as_mut() {
+                        press.dragging = true;
+                    }
+                    self.pet.begin_drag();
+                    self.drag_grab = Some((lx - WIN as f64 * 0.5, ly - WIN as f64 * 0.5));
+                }
+
+                if let Some((ox, oy)) = self.drag_grab {
+                    if let Some(window) = self.window.clone() {
+                        let outer = window
+                            .outer_position()
+                            .unwrap_or(PhysicalPosition::new(0, 0));
+                        let scale = window.scale_factor();
+                        let desk_x = outer.x as f64 / scale + position.x / scale;
+                        let desk_y = outer.y as f64 / scale + position.y / scale;
+                        self.pet.drag_to(desk_x - ox, desk_y - oy);
+                        self.sync_window_pos(true);
+                        self.next_frame = Instant::now();
+                        window.request_redraw();
+                    }
+                } else {
+                    self.update_passthrough();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor_local = None;
+                self.update_passthrough();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if let Some((lx, ly)) = self.cursor_logical_in_window() {
+                    if render::hit_pet(&self.pixels, WIN, WIN, lx, ly) {
+                        self.show_ctx_menu();
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some((lx, ly)) = self.cursor_logical_in_window() {
+                    if let Some(window) = &self.window {
+                        if render::hit_pet(&self.pixels, WIN, WIN, lx, ly) {
+                            self.pet.on_press();
+                            if let Some((dx, dy)) = self.desk_from_cursor_local(lx, ly) {
+                                self.press = Some(PressState {
+                                    t0: Instant::now(),
+                                    desk_x: dx,
+                                    desk_y: dy,
+                                    dragging: false,
+                                    petting: false,
+                                });
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                macos::set_ignore_mouse(window, false);
+                                self.ignore_mouse = false;
+                            }
+                            self.next_frame = Instant::now();
+                            window.request_redraw();
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let was_drag = self.press.as_ref().map(|p| p.dragging).unwrap_or(false);
+                let was_pet = self.press.as_ref().map(|p| p.petting).unwrap_or(false)
+                    || self.pet.mode == Mode::Pet;
+                self.press = None;
+                self.drag_grab = None;
+                if was_drag || self.pet.dragging {
+                    self.pet.end_drag();
+                } else if was_pet {
+                    self.pet.end_pet();
+                }
+                self.next_frame = Instant::now();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                // Esc hides (same as tray toggle); quit only via tray「退出」.
+                if event.logical_key == Key::Named(NamedKey::Escape) {
+                    self.set_pet_visible(false);
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.scale = scale_factor;
+            }
+            _ => {}
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::MenuEvent(ev) => self.handle_menu(&ev, event_loop),
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+}
+
+impl App {
+    fn handle_menu(&mut self, ev: &MenuEvent, event_loop: &ActiveEventLoop) {
+        if Some(&ev.id) == self.quit_id.as_ref() {
+            event_loop.exit();
+            return;
+        }
+        if Some(&ev.id) == self.toggle_id.as_ref() {
+            self.set_pet_visible(self.hidden);
+            return;
+        }
+        for (id, sp) in &self.species_ids {
+            if &ev.id == id {
+                let sp = *sp;
+                self.pet.set_species(sp);
+                self.poke();
+                return;
+            }
+        }
+        for (id, coat) in &self.color_ids {
+            if &ev.id == id {
+                let coat = *coat;
+                self.pet.set_coat(coat);
+                self.poke();
+                return;
+            }
+        }
+        if Some(&ev.id) == self.feed_id.as_ref() {
+            self.pet.spawn_feed();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.yarn_id.as_ref() {
+            self.pet.spawn_toy(ToyKind::Yarn);
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.ball_id.as_ref() {
+            self.pet.spawn_toy(ToyKind::Ball);
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.paper_id.as_ref() {
+            self.pet.spawn_toy(ToyKind::Paper);
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.mouse_id.as_ref() {
+            self.pet.spawn_toy(ToyKind::Mouse);
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.laser_id.as_ref() {
+            self.pet.spawn_toy(ToyKind::Laser);
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.wand_id.as_ref() {
+            self.pet.spawn_toy(ToyKind::Wand);
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.cancel_toy_id.as_ref() {
+            self.pet.cancel_toy();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.bird_id.as_ref() {
+            self.pet.spawn_bird_flyby();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.butterfly_id.as_ref() {
+            self.pet.spawn_nose_butterfly();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.photo_id.as_ref() {
+            self.pet.take_photo();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.clingy_id.as_ref() {
+            self.feed_cursor();
+            self.pet.start_clingy();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.gift_id.as_ref() {
+            self.pet.start_gifting();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.sleep_id.as_ref() {
+            self.pet.force_scene = None;
+            self.pet.go_sleep();
+            self.poke();
+            return;
+        }
+        if Some(&ev.id) == self.bed_id.as_ref() {
+            self.pet.force_scene = None;
+            self.pet.go_to_bed();
+            self.poke();
+        }
+    }
+
+    fn poke(&mut self) {
+        self.next_frame = Instant::now();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Show/hide the pet window without quitting the process (tray stays).
+    fn set_pet_visible(&mut self, visible: bool) {
+        self.hidden = !visible;
+        if let Some(window) = &self.window {
+            window.set_visible(visible);
+            if visible {
+                #[cfg(target_os = "macos")]
+                macos::order_front(window);
+                window.request_redraw();
+                self.next_frame = Instant::now();
+            }
+        }
+    }
+
+    fn show_ctx_menu(&self) {
+        let Some(menu) = &self.ctx_menu else {
+            return;
+        };
+        let Some(window) = &self.window else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(view) = macos::ns_view_ptr(window) {
+                // SAFETY: view is the live NSView from winit.
+                unsafe {
+                    menu.show_context_menu_for_nsview(view, None);
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (menu, window);
+        }
+    }
+}
+
+/// Nearest-neighbor blit from a logical canvas to a physical softbuffer.
+fn blit_nn(src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32) {
+    let need = (dw * dh) as usize;
+    if dst.len() < need || sw == 0 || sh == 0 {
+        return;
+    }
+    if sw == dw && sh == dh {
+        dst[..need].copy_from_slice(&src[..need.min(src.len())]);
+        return;
+    }
+    for y in 0..dh {
+        let sy = (y as u64 * sh as u64 / dh as u64) as u32;
+        let src_row = (sy * sw) as usize;
+        let dst_row = (y * dw) as usize;
+        for x in 0..dw {
+            let sx = (x as u64 * sw as u64 / dw as u64) as u32;
+            dst[dst_row + x as usize] = src[src_row + sx as usize];
+        }
+    }
+}
+
+fn tray_icon_from_orange() -> Icon {
+    // 32x32 solid orange with simple ears baked in (ARGB).
+    let size = 32u32;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let cx = x as f64 - 15.5;
+            let cy = y as f64 - 17.0;
+            let body = (cx * cx) / (11.0 * 11.0) + (cy * cy) / (9.0 * 9.0) <= 1.0;
+            let ear_l = (x as i32 - 8).pow(2) + (y as i32 - 6).pow(2) < 18;
+            let ear_r = (x as i32 - 23).pow(2) + (y as i32 - 6).pow(2) < 18;
+            let i = ((y * size + x) * 4) as usize;
+            if body || ear_l || ear_r {
+                rgba[i] = 0xE8;
+                rgba[i + 1] = 0x9A;
+                rgba[i + 2] = 0x3A;
+                rgba[i + 3] = 0xFF;
+            }
+        }
+    }
+    Icon::from_rgba(rgba, size, size).expect("tray icon")
+}
+
+fn parse_force_scene() -> Option<ForceScene> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--mode" {
+            return parse_force_scene_value(&args.next()?);
+        }
+        if let Some(v) = a.strip_prefix("--mode=") {
+            return parse_force_scene_value(v);
+        }
+    }
+    None
+}
+
+fn parse_force_scene_value(v: &str) -> Option<ForceScene> {
+    match v.to_ascii_lowercase().as_str() {
+        "sleeping" | "sleep" => Some(ForceScene::Sleeping),
+        "idle" => Some(ForceScene::Idle),
+        "walking" | "walk" => Some(ForceScene::Walking),
+        other => {
+            eprintln!("unknown --mode {other} (use sleeping|idle|walking)");
+            None
+        }
+    }
+}
+
+fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "?".into());
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Box<Any>".into()
+        };
+        let line = format!("panic at {loc}: {msg}\n");
+        let _ = std::fs::write("/tmp/cat-desk-pet-panic.log", &line);
+        eprintln!("{line}");
+    }));
+
+    let force = parse_force_scene();
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
+    let proxy = event_loop.create_proxy();
+    MenuEvent::set_event_handler(Some(move |event| {
+        let _ = proxy.send_event(UserEvent::MenuEvent(event));
+    }));
+
+    // Rough primary-screen logical size fallback; refined once window exists.
+    let (sw, sh) = (1440.0, 900.0);
+    let mut app = App::new(sw, sh);
+    if let Some(scene) = force {
+        app.pet.force_scene = Some(scene);
+        app.pet.mode = match scene {
+            ForceScene::Walking => Mode::Walking,
+            ForceScene::Idle => Mode::Idle,
+            ForceScene::Sleeping => Mode::Sleeping,
+        };
+        eprintln!("native-spike: force scene = {scene:?}");
+    }
+
+    // Seed control flow so WaitUntil fires.
+    app.next_frame = Instant::now() + Duration::from_millis(16);
+
+    event_loop.run_app(&mut app).unwrap();
+}

@@ -1,0 +1,54 @@
+[package]
+name = "cat-desk-pet"
+version = "2.0.0"
+edition = "2021"
+description = "Cat Desk Pet — native small-window desktop pet (no WebView)"
+publish = false
+
+[[bin]]
+name = "cat-desk-pet"
+path = "src/main.rs"
+
+[dependencies]
+winit = "0.30"
+tray-icon = "0.19"
+raw-window-handle = "0.6"
+resvg = "0.44"
+
+# softbuffer ignores alpha on macOS (NoneSkipFirst) — we present via CALayer there.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+softbuffer = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+  "NSApplication",
+  "NSWindow",
+  "NSResponder",
+  "NSView",
+  "NSColor",
+  "NSGraphics",
+  "NSScreen",
+  "NSEvent",
+  "objc2-quartz-core",
+] }
+objc2-core-foundation = { version = "0.3", features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+  "std",
+  "objc2",
+  "CGColorSpace",
+  "CGDataProvider",
+  "CGImage",
+] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+  "std",
+  "objc2-core-foundation",
+  "CALayer",
+  "CATransaction",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

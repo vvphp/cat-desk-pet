@@ -1,0 +1,81 @@
+name: Release
+
+# git tag v2.0.0 && git push origin v2.0.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  macos:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build universal binary
+        run: |
+          set -euo pipefail
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist/macos target/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/cat-desk-pet \
+            target/x86_64-apple-darwin/release/cat-desk-pet \
+            -output dist/macos/cat-desk-pet
+          chmod +x dist/macos/cat-desk-pet
+          cp dist/macos/cat-desk-pet target/release/cat-desk-pet
+          SKIP_BUILD=1 bash tools/package-macos.sh
+
+      - name: Publish GitHub Release (macOS)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Cat Desk Pet $TAG" \
+              --notes "$(cat <<EOF
+          🐾 Cat Desk Pet $TAG
+
+          原生小窗桌宠（Rust + SVG，无 WebView）。
+
+          **下载**
+          - macOS：\`CatDeskPet.dmg\`
+          - Windows：\`cat-desk-pet.exe\`（同 Release）
+
+          未签名：macOS 右键打开；Windows SmartScreen → Run anyway。
+          EOF
+          )"
+          fi
+          gh release upload "$TAG" \
+            dist/macos/CatDeskPet.dmg \
+            dist/macos/cat-desk-pet \
+            --clobber
+
+  windows:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release exe
+        run: cargo build --release
+      - name: Publish GitHub Release (Windows)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "Cat Desk Pet $TAG" --notes "🐾 Cat Desk Pet $TAG"
+          fi
+          gh release upload "$TAG" target/release/cat-desk-pet.exe --clobber

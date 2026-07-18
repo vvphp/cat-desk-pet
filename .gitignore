@@ -1,0 +1,8 @@
+/target/
+/dist/
+**/*.rs.bk
+.DS_Store
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,20 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release exe
+        run: cargo build --release
+      - name: Upload portable exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: cat-desk-pet-portable
+          path: target/release/cat-desk-pet.exe

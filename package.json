@@ -1,0 +1,11 @@
+{
+  "name": "cat-desk-pet",
+  "private": true,
+  "version": "2.0.0",
+  "scripts": {
+    "dev": "cargo run --release",
+    "build": "cargo build --release",
+    "start": "bash tools/run-pet.sh",
+    "package:macos": "bash tools/package-macos.sh"
+  }
+}
