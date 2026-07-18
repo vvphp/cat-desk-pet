@@ -586,15 +586,14 @@ pub fn blit_sprite(
     sprite: &[u32],
     facing: f64,
     bob: f64,
-    off_x: f64,
-    off_y: f64,
+    dest_cx: f64,
+    dest_cy: f64,
 ) {
     if sprite.len() < (SPRITE_W * SPRITE_H) as usize {
         return;
     }
     let flip = facing < 0.0;
-    let dest_cx = win_w as f64 * 0.5 + off_x;
-    let dest_cy = win_h as f64 * 0.55 + bob + off_y;
+    let dest_cy = dest_cy + bob;
     let left = (dest_cx - SPRITE_W as f64 * 0.5).round() as i32;
     let top = (dest_cy - SPRITE_H as f64 * 0.55).round() as i32;
 

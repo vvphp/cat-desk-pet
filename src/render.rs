@@ -15,26 +15,28 @@ pub fn clear(buf: &mut [u32]) {
     buf.fill(0);
 }
 
+/// Draw pet + world props into a logical canvas.
+/// `origin_x/y` = desktop coords of the window's top-left (so props far from the
+/// pet stay visible when the OS window has grown to `visible_bounds`).
 pub fn draw_pet(
     buf: &mut [u32],
     w: u32,
     h: u32,
     pet: &Pet,
-    off_x: f64,
-    off_y: f64,
+    origin_x: f64,
+    origin_y: f64,
     sprites: &mut SpriteCache,
 ) {
     clear(buf);
-    let cx = w as f64 * 0.5 + off_x;
-    let cy = h as f64 * 0.55 + off_y;
+    let to_local = |x: f64, y: f64| (x - origin_x, y - origin_y);
+    let (cx, cy) = to_local(pet.x, pet.y);
 
     if pet.mode == Mode::InBed {
-        draw_bed(buf, w, h, cx, cy + 18.0);
+        let (bx, by) = to_local(pet.home_x, pet.home_y);
+        draw_bed(buf, w, h, bx, by + 18.0);
     } else if pet.mode == Mode::GoingHome {
-        // Bed waits at the home corner while the pet walks over.
-        let bx = cx + (pet.home_x - pet.x);
-        let by = cy + (pet.home_y - pet.y) + 18.0;
-        draw_bed(buf, w, h, bx, by);
+        let (bx, by) = to_local(pet.home_x, pet.home_y);
+        draw_bed(buf, w, h, bx, by + 18.0);
     }
 
     let bob = match pet.mode {
@@ -56,7 +58,7 @@ pub fn draw_pet(
 
     let sprite = sprites.pixels_for(pet);
     if !sprite.is_empty() {
-        sprite::blit_sprite(buf, w, h, sprite, pet.facing, bob, off_x, off_y);
+        sprite::blit_sprite(buf, w, h, sprite, pet.facing, bob, cx, cy);
     } else {
         // fallback if resvg fails
         draw_walking(buf, w, h, cx, cy + bob, pet);
@@ -67,18 +69,16 @@ pub fn draw_pet(
         draw_z(buf, w, h, cx + 36.0, cy - 36.0 + bob, z_alpha);
     }
 
-    // World props relative to pet center (window tracks pet).
+    // World props in the same desktop→local space as the pet.
     if let Some(feed) = &pet.feed {
-        let fx = cx + (feed.x - pet.x);
-        let fy = cy + (feed.y - pet.y);
+        let (fx, fy) = to_local(feed.x, feed.y);
         draw_food(buf, w, h, fx, fy, feed.eat_t.is_some(), pet.species);
     }
     if let Some(toy) = &pet.toy {
         if toy.kind == ToyKind::Laser {
-            draw_laser_trail(buf, w, h, pet, cx, cy);
+            draw_laser_trail(buf, w, h, pet, origin_x, origin_y);
         }
-        let tx = cx + (toy.x - pet.x);
-        let ty = cy + (toy.y - pet.y);
+        let (tx, ty) = to_local(toy.x, toy.y);
         match toy.kind {
             ToyKind::Yarn => draw_yarn(buf, w, h, tx, ty, toy.age),
             ToyKind::Ball => draw_ball(buf, w, h, tx, ty),
@@ -89,16 +89,14 @@ pub fn draw_pet(
         }
     }
     if let Some(flyer) = &pet.flyer {
-        let fx = cx + (flyer.x - pet.x);
-        let fy = cy + (flyer.y - pet.y);
+        let (fx, fy) = to_local(flyer.x, flyer.y);
         match flyer.kind {
             FlyerKind::Bird => draw_bird(buf, w, h, fx, fy, flyer.vx),
             FlyerKind::Butterfly => draw_butterfly(buf, w, h, fx, fy, flyer.age),
         }
     }
     if let Some(gift) = &pet.gift {
-        let gx = cx + (gift.x - pet.x);
-        let gy = cy + (gift.y - pet.y);
+        let (gx, gy) = to_local(gift.x, gift.y);
         draw_gift(buf, w, h, gx, gy, gift.kind, gift.fade);
     }
 
@@ -481,7 +479,7 @@ fn draw_wand(buf: &mut [u32], w: u32, h: u32, x: f64, y: f64, spin_deg: f64) {
     fill_ellipse(buf, w, h, x, y, 3.5, 3.5, 0xF4, 0xE8, 0xA0);
 }
 
-fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &Pet, cx: f64, cy: f64) {
+fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &Pet, origin_x: f64, origin_y: f64) {
     let pts: Vec<_> = pet.laser_trail.iter().copied().collect();
     if pts.len() < 2 {
         return;
@@ -490,10 +488,10 @@ fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &Pet, cx: f64, cy: f64
     for i in 1..n {
         let a = pts[i - 1];
         let b = pts[i];
-        let ax = cx + (a.x - pet.x);
-        let ay = cy + (a.y - pet.y);
-        let bx = cx + (b.x - pet.x);
-        let by = cy + (b.y - pet.y);
+        let ax = a.x - origin_x;
+        let ay = a.y - origin_y;
+        let bx = b.x - origin_x;
+        let by = b.y - origin_y;
         let op = ((i as f64 / n as f64) * 0.55 * 255.0) as u8;
         let thick = 1.0 + i as f64 * 0.2;
         draw_line_alpha(buf, w, h, ax, ay, bx, by, thick, op, 0xFF, 0x35, 0x35);

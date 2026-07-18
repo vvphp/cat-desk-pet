@@ -28,7 +28,7 @@ use tray_icon::menu::{
 };
 use tray_icon::{Icon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
@@ -69,6 +69,9 @@ struct PressState {
 
 struct App {
     window: Option<Rc<Window>>,
+    /// Monitor-sized white overlay for photo flash (WebView `#flash`).
+    #[cfg(target_os = "macos")]
+    flash_window: Option<Rc<Window>>,
     #[cfg(not(target_os = "macos"))]
     context: Option<Context<Rc<Window>>>,
     #[cfg(not(target_os = "macos"))]
@@ -94,11 +97,13 @@ struct App {
     press: Option<PressState>,
     scale: f64,
     /// Committed OS window top-left (logical). May lag `pet` while walking;
-    /// sprite is drawn with a compensating in-window offset.
+    /// drawing uses this origin so the sprite stays on-screen.
     last_win_pos: Option<(f64, f64)>,
+    /// Committed logical canvas size (grows to fit toys / flyers).
+    view_w: u32,
+    view_h: u32,
     last_win_move: Instant,
     last_passthrough: Instant,
-    draw_off: (f64, f64),
 }
 
 /// How far (logical px) the pet may drift inside the window before we move the OS window.
@@ -113,6 +118,8 @@ impl App {
         let now = Instant::now();
         Self {
             window: None,
+            #[cfg(target_os = "macos")]
+            flash_window: None,
             #[cfg(not(target_os = "macos"))]
             context: None,
             #[cfg(not(target_os = "macos"))]
@@ -135,50 +142,52 @@ impl App {
             press: None,
             scale: 1.0,
             last_win_pos: None,
+            view_w: WIN,
+            view_h: WIN,
             last_win_move: now,
             last_passthrough: now,
-            draw_off: (0.0, 0.0),
         }
     }
 
-    fn desired_win_pos(&self) -> (f64, f64) {
-        let half = WIN as f64 * 0.5;
-        (
-            (self.pet.x - half).round(),
-            (self.pet.y - half).round(),
-        )
+    /// Window top-left + logical size covering pet and world props.
+    fn desired_view(&self) -> (f64, f64, u32, u32) {
+        let (x0, y0, x1, y1) = self.pet.visible_bounds();
+        let w = ((x1 - x0).ceil() as u32).max(WIN);
+        let h = ((y1 - y0).ceil() as u32).max(WIN);
+        (x0.round(), y0.round(), w, h)
     }
 
-    /// Commit OS window position sparingly; keep `draw_off` so the sprite stays on-screen.
+    /// Commit OS window size/position; canvas grows for toys / flyers.
     fn sync_window_pos(&mut self, force: bool) {
         let Some(window) = &self.window else { return };
-        let (lx, ly) = self.desired_win_pos();
+        let (lx, ly, lw, lh) = self.desired_view();
         let now = Instant::now();
 
+        let size_changed = self.view_w != lw || self.view_h != lh;
         let should_move = force
+            || size_changed
             || match self.last_win_pos {
                 None => true,
                 Some((ox, oy)) => {
                     let far = (ox - lx).abs() >= WIN_MOVE_THRESHOLD
                         || (oy - ly).abs() >= WIN_MOVE_THRESHOLD;
                     let due = now.duration_since(self.last_win_move) >= WIN_MOVE_MIN_INTERVAL;
-                    // Move when we've drifted enough AND the min interval has passed,
-                    // or when drift is large (>2× threshold) to avoid visible clip.
                     let very_far = (ox - lx).abs() >= WIN_MOVE_THRESHOLD * 2.0
                         || (oy - ly).abs() >= WIN_MOVE_THRESHOLD * 2.0;
                     (far && due) || very_far || self.pet.dragging
                 }
             };
 
+        if size_changed {
+            let _ = window.request_inner_size(LogicalSize::new(lw, lh));
+            self.view_w = lw;
+            self.view_h = lh;
+        }
+
         if should_move {
             let _ = window.set_outer_position(LogicalPosition::new(lx, ly));
             self.last_win_pos = Some((lx, ly));
             self.last_win_move = now;
-            self.draw_off = (0.0, 0.0);
-        } else if let Some((ox, oy)) = self.last_win_pos {
-            // Logical pet moved; keep it visually correct via in-buffer offset
-            // (logical px — drawing always happens on a WIN×WIN logical canvas).
-            self.draw_off = (lx - ox, ly - oy);
         }
     }
 
@@ -191,18 +200,23 @@ impl App {
         let pw = size.width.max(1);
         let ph = size.height.max(1);
 
-        // Always paint in logical WIN×WIN space, then nearest-neighbor upscale
-        // to physical pixels. Otherwise Retina (2×) makes the pet a tiny blob.
-        let need = (WIN * WIN) as usize;
+        // Paint in logical view space (may be >WIN when props are far), then
+        // nearest-neighbor upscale to physical pixels for Retina.
+        let lw = self.view_w.max(1);
+        let lh = self.view_h.max(1);
+        let need = (lw as usize).saturating_mul(lh as usize);
         if self.pixels.len() != need {
             self.pixels.resize(need, 0);
         }
 
-        let (ox, oy) = self.draw_off;
+        let (ox, oy) = self.last_win_pos.unwrap_or_else(|| {
+            let (x, y, _, _) = self.desired_view();
+            (x, y)
+        });
         render::draw_pet(
             &mut self.pixels,
-            WIN,
-            WIN,
+            lw,
+            lh,
             &self.pet,
             ox,
             oy,
@@ -213,8 +227,8 @@ impl App {
         if self.present_buf.len() != phys {
             self.present_buf.resize(phys, 0);
         }
-        if pw != WIN || ph != WIN {
-            blit_nn(&self.pixels, WIN, WIN, &mut self.present_buf, pw, ph);
+        if pw != lw || ph != lh {
+            blit_nn(&self.pixels, lw, lh, &mut self.present_buf, pw, ph);
         } else {
             self.present_buf.copy_from_slice(&self.pixels[..need]);
         }
@@ -335,7 +349,24 @@ impl App {
     }
 
     fn hits_pet_local(&self, lx: f64, ly: f64) -> bool {
-        render::hit_pet_padded(&self.pixels, WIN, WIN, lx, ly, PET_HIT_PAD)
+        render::hit_pet_padded(
+            &self.pixels,
+            self.view_w.max(1),
+            self.view_h.max(1),
+            lx,
+            ly,
+            PET_HIT_PAD,
+        )
+    }
+
+    fn window_origin(&self) -> (f64, f64) {
+        match self.last_win_pos {
+            Some(p) => p,
+            None => {
+                let (x, y, _, _) = self.desired_view();
+                (x, y)
+            }
+        }
     }
 
     /// Desktop cursor → window-local hit (same pad as click / context menu).
@@ -344,10 +375,7 @@ impl App {
         let Some((cx, cy)) = macos::cursor_logical_top_left() else {
             return false;
         };
-        let (wx, wy) = match self.last_win_pos {
-            Some(p) => p,
-            None => self.desired_win_pos(),
-        };
+        let (wx, wy) = self.window_origin();
         self.hits_pet_local(cx - wx, cy - wy)
     }
 
@@ -361,6 +389,60 @@ impl App {
         };
         event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at.max(now)));
     }
+
+    /// WebView `#flash`: full-monitor white overlay. Pet window alone is only ~180².
+    #[cfg(target_os = "macos")]
+    fn sync_flash_overlay(&mut self, event_loop: &ActiveEventLoop) {
+        const FLASH_EPS: f64 = 0.02;
+        let intensity = self.pet.flash;
+        if intensity < FLASH_EPS {
+            if let Some(w) = &self.flash_window {
+                macos::set_window_alpha(w, 0.0);
+                w.set_visible(false);
+            }
+            return;
+        }
+
+        if self.flash_window.is_none() {
+            let monitor = event_loop
+                .primary_monitor()
+                .or_else(|| event_loop.available_monitors().next());
+            let Some(monitor) = monitor else {
+                return;
+            };
+            let size = monitor.size();
+            let pos = monitor.position();
+            let attrs = Window::default_attributes()
+                .with_title("摸鱼猫闪光")
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_resizable(false)
+                .with_window_level(WindowLevel::AlwaysOnTop)
+                .with_visible(false)
+                .with_inner_size(PhysicalSize::new(size.width.max(1), size.height.max(1)))
+                .with_position(PhysicalPosition::new(pos.x, pos.y));
+            match event_loop.create_window(attrs) {
+                Ok(w) => {
+                    let w = Rc::new(w);
+                    macos::configure_flash_overlay(&w);
+                    self.flash_window = Some(w);
+                }
+                Err(_) => return,
+            }
+        }
+
+        let Some(w) = &self.flash_window else {
+            return;
+        };
+        // Match WebView peak (~0.95).
+        let alpha = (intensity * 0.95).clamp(0.0, 0.95);
+        w.set_visible(true);
+        macos::set_window_alpha(w, alpha);
+        macos::order_front(w);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn sync_flash_overlay(&mut self, _event_loop: &ActiveEventLoop) {}
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -540,6 +622,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.pet.update(dt);
             self.sync_window_pos(false);
             self.update_passthrough();
+            self.sync_flash_overlay(event_loop);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -547,6 +630,10 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             // Refresh passthrough between paint frames so wake/click stays responsive.
             self.update_passthrough();
+            // Flash decays every tick path — keep overlay alpha in sync between paints.
+            if self.pet.flash > 0.02 {
+                self.sync_flash_overlay(event_loop);
+            }
         }
         self.schedule_wake(event_loop);
 
@@ -608,9 +695,20 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(
         &mut self,
         _event_loop: &ActiveEventLoop,
-        _id: WindowId,
+        id: WindowId,
         event: WindowEvent,
     ) {
+        #[cfg(target_os = "macos")]
+        if self.flash_window.as_ref().is_some_and(|w| w.id() == id) {
+            // Overlay is click-through; ignore its lifecycle besides suppress close.
+            if matches!(event, WindowEvent::CloseRequested) {
+                if let Some(w) = &self.flash_window {
+                    w.set_visible(false);
+                }
+            }
+            return;
+        }
+
         match event {
             // Tray app: Cmd+W / system close must NOT quit — only hide.
             WindowEvent::CloseRequested => {
@@ -640,7 +738,8 @@ impl ApplicationHandler<UserEvent> for App {
                         press.dragging = true;
                     }
                     self.pet.begin_drag();
-                    self.drag_grab = Some((lx - WIN as f64 * 0.5, ly - WIN as f64 * 0.5));
+                    let (wx, wy) = self.window_origin();
+                    self.drag_grab = Some((lx - (self.pet.x - wx), ly - (self.pet.y - wy)));
                 }
 
                 if let Some((ox, oy)) = self.drag_grab {
@@ -797,6 +896,7 @@ impl App {
             }
             MenuCommand::Photo => {
                 self.pet.take_photo();
+                self.sync_flash_overlay(event_loop);
                 self.poke();
             }
             MenuCommand::Clingy => {

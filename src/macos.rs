@@ -57,6 +57,26 @@ pub fn set_ignore_mouse(window: &Window, ignore: bool) {
     ns_window.setIgnoresMouseEvents(ignore);
 }
 
+/// Full-screen photo flash overlay: white panel, click-through, alpha-driven.
+pub fn configure_flash_overlay(window: &Window) {
+    let Some(ns_window) = ns_window(window) else {
+        return;
+    };
+    ns_window.setOpaque(false);
+    ns_window.setHasShadow(false);
+    ns_window.setBackgroundColor(Some(&NSColor::whiteColor()));
+    ns_window.setIgnoresMouseEvents(true);
+    ns_window.setAlphaValue(0.0);
+    ns_window.orderFrontRegardless();
+}
+
+pub fn set_window_alpha(window: &Window, alpha: f64) {
+    let Some(ns_window) = ns_window(window) else {
+        return;
+    };
+    ns_window.setAlphaValue(alpha.clamp(0.0, 1.0));
+}
+
 /// Present straight ARGB `0xAARRGGBB` pixels with real transparency via CALayer.
 ///
 /// softbuffer 0.4's macOS backend uses `CGImageAlphaInfo::NoneSkipFirst`, which

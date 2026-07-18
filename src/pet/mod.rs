@@ -492,6 +492,61 @@ impl Pet {
         self.clamp_pos();
     }
 
+    /// Desktop-logical axis-aligned bounds that must stay visible (pet + world props).
+    /// Used to grow the small window so toys / flyers aren't clipped.
+    pub fn visible_bounds(&self) -> (f64, f64, f64, f64) {
+        // Match the idle pet window (~180²) footprint around the pet.
+        const BASE: f64 = 180.0;
+        let half = BASE * 0.5;
+        let mut min_x = self.x - half;
+        let mut max_x = self.x + half;
+        let mut min_y = self.y - half;
+        let mut max_y = self.y + half;
+
+        let mut include = |x: f64, y: f64, pad: f64| {
+            min_x = min_x.min(x - pad);
+            max_x = max_x.max(x + pad);
+            min_y = min_y.min(y - pad);
+            max_y = max_y.max(y + pad);
+        };
+
+        if let Some(t) = &self.toy {
+            include(t.x, t.y, 48.0);
+            if t.kind == ToyKind::Laser {
+                for p in &self.laser_trail {
+                    include(p.x, p.y, 24.0);
+                }
+            }
+        }
+        if let Some(f) = &self.flyer {
+            include(f.x, f.y, 40.0);
+        }
+        if let Some(feed) = &self.feed {
+            include(feed.x, feed.y, 36.0);
+        }
+        if let Some(g) = &self.gift {
+            include(g.x, g.y, 36.0);
+        }
+        if matches!(self.mode, Mode::GoingHome | Mode::InBed) {
+            include(self.home_x, self.home_y, 70.0);
+        }
+
+        // Clamp to screen so the OS window never exceeds the desktop.
+        min_x = min_x.max(0.0);
+        min_y = min_y.max(0.0);
+        max_x = max_x.min(self.screen_w);
+        max_y = max_y.min(self.screen_h);
+        if max_x - min_x < BASE {
+            max_x = (min_x + BASE).min(self.screen_w);
+            min_x = (max_x - BASE).max(0.0);
+        }
+        if max_y - min_y < BASE {
+            max_y = (min_y + BASE).min(self.screen_h);
+            min_y = (max_y - BASE).max(0.0);
+        }
+        (min_x, min_y, max_x, max_y)
+    }
+
     pub fn note_cursor(&mut self, pos: Option<(f64, f64)>) {
         self.cursor = pos;
         let Some((x, y)) = pos else {
