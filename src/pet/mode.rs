@@ -26,6 +26,39 @@ pub enum Mode {
     Startled,
     Photo,
     Gifting,
+    /// Short-click reaction (meow / heart / spin / …).
+    Trick,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrickAction {
+    Meow,
+    Heart,
+    Spin,
+    Pounce,
+    HappyJump,
+    Grumpy,
+    Wave,
+    Shy,
+    Kiss,
+    SwatCursor,
+}
+
+impl TrickAction {
+    pub fn duration(self) -> f64 {
+        match self {
+            TrickAction::Meow => 0.9,
+            TrickAction::Heart => 1.3,
+            TrickAction::Spin => 0.7,
+            TrickAction::Pounce => 0.6,
+            TrickAction::HappyJump => 0.9,
+            TrickAction::Grumpy => 1.2,
+            TrickAction::Wave => 1.4,
+            TrickAction::Shy => 1.6,
+            TrickAction::Kiss => 1.1,
+            TrickAction::SwatCursor => 0.7,
+        }
+    }
 }
 
 impl Mode {
@@ -41,7 +74,8 @@ impl Mode {
             | Mode::Interested
             | Mode::Feeding
             | Mode::ButterflyNose
-            | Mode::Gifting => Duration::from_millis(40),
+            | Mode::Gifting
+            | Mode::Trick => Duration::from_millis(40),
             Mode::Dragged
             | Mode::Chasing
             | Mode::Playing
@@ -70,7 +104,7 @@ impl Mode {
                 | Mode::Startled
                 | Mode::Photo
                 | Mode::Gifting
+                | Mode::Trick
         )
     }
 }
-

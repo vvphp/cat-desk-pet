@@ -9,6 +9,7 @@
 mod pet;
 mod render;
 mod sprite;
+mod text;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -110,6 +111,8 @@ struct App {
 const WIN_MOVE_THRESHOLD: f64 = 6.0;
 /// Cap OS window moves even while walking (~12 Hz).
 const WIN_MOVE_MIN_INTERVAL: Duration = Duration::from_millis(80);
+/// Ignore sub-threshold view size jitter from ceil/round while props move.
+const VIEW_SIZE_THRESHOLD: u32 = 8;
 /// Shared alpha hit pad for passthrough capture and click/context menu.
 const PET_HIT_PAD: i32 = 4;
 /// Leave-capture ellipse scale (enter uses 1.0). Stops bob/orbit from
@@ -161,12 +164,19 @@ impl App {
     }
 
     /// Commit OS window size/position; canvas grows for toys / flyers.
-    fn sync_window_pos(&mut self, force: bool) {
-        let Some(window) = &self.window else { return };
+    /// Returns true when size or origin changed (caller should present immediately).
+    fn sync_window_pos(&mut self, force: bool) -> bool {
+        let Some(window) = &self.window else { return false };
         let (lx, ly, lw, lh) = self.desired_view();
         let now = Instant::now();
 
-        let size_changed = self.view_w != lw || self.view_h != lh;
+        // Grow immediately so props aren't clipped; shrink only past a threshold
+        // so ceil/round at the bounds edge doesn't resize every frame (flash).
+        let size_changed = force
+            || lw > self.view_w
+            || lh > self.view_h
+            || self.view_w.abs_diff(lw) >= VIEW_SIZE_THRESHOLD
+            || self.view_h.abs_diff(lh) >= VIEW_SIZE_THRESHOLD;
         let should_move = force
             || size_changed
             || match self.last_win_pos {
@@ -181,7 +191,7 @@ impl App {
                 }
             };
 
-        if size_changed {
+        if size_changed && (self.view_w != lw || self.view_h != lh) {
             let _ = window.request_inner_size(LogicalSize::new(lw, lh));
             self.view_w = lw;
             self.view_h = lh;
@@ -196,6 +206,7 @@ impl App {
             self.last_win_pos = Some((lx, ly));
             self.last_win_move = now;
         }
+        size_changed || should_move
     }
 
     fn redraw(&mut self) {
@@ -203,14 +214,15 @@ impl App {
             return;
         };
 
-        let size = window.inner_size();
-        let pw = size.width.max(1);
-        let ph = size.height.max(1);
-
         // Paint in logical view space (may be >WIN when props are far), then
         // nearest-neighbor upscale to physical pixels for Retina.
+        // Use view×scale (not lagging inner_size) so a pending request_inner_size
+        // can't present one stretched/wrong frame while the OS catches up.
         let lw = self.view_w.max(1);
         let lh = self.view_h.max(1);
+        let scale = window.scale_factor().max(0.01);
+        let pw = ((lw as f64) * scale).round().max(1.0) as u32;
+        let ph = ((lh as f64) * scale).round().max(1.0) as u32;
         let need = (lw as usize).saturating_mul(lh as usize);
         if self.pixels.len() != need {
             self.pixels.resize(need, 0);
@@ -281,7 +293,7 @@ impl App {
             | Mode::ButterflyNose
             | Mode::Photo
             | Mode::Gifting => Duration::from_millis(50),
-            Mode::Dragged | Mode::Chasing | Mode::Playing | Mode::Startled => {
+            Mode::Dragged | Mode::Chasing | Mode::Playing | Mode::Startled | Mode::Trick => {
                 Duration::from_millis(33)
             }
         }
@@ -375,8 +387,9 @@ impl App {
     fn hits_pet_body_scaled(&self, desk_x: f64, desk_y: f64, scale: f64) -> bool {
         let dx = desk_x - self.pet.x;
         let dy = desk_y - self.pet.y;
-        let rx = (52.0 + PET_HIT_PAD as f64) * scale;
-        let ry = (44.0 + PET_HIT_PAD as f64) * scale;
+        // Ellipse ~ WebView 120×110 body (was sized for the old 160² sprite).
+        let rx = (39.0 + PET_HIT_PAD as f64) * scale;
+        let ry = (33.0 + PET_HIT_PAD as f64) * scale;
         (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
     }
 
@@ -661,12 +674,13 @@ impl ApplicationHandler<UserEvent> for App {
             self.feed_cursor();
             self.tick_press();
             self.pet.update(dt);
+            // Present in the same turn as any window move/resize — async
+            // request_redraw leaves one frame of stale layer at the new origin
+            // (visible as flicker while walking).
             self.sync_window_pos(false);
             self.update_passthrough();
             self.sync_flash_overlay(event_loop);
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            self.redraw();
             self.next_frame = now + self.pet.mode.frame_interval();
         } else {
             // Refresh pet-ellipse ignore toggle between paints (pre-click capture).
@@ -857,12 +871,20 @@ impl ApplicationHandler<UserEvent> for App {
                 let was_drag = self.press.as_ref().map(|p| p.dragging).unwrap_or(false);
                 let was_pet = self.press.as_ref().map(|p| p.petting).unwrap_or(false)
                     || self.pet.mode == Mode::Pet;
+                let short_click = self.press.as_ref().is_some_and(|p| {
+                    !p.dragging
+                        && !p.petting
+                        && p.t0.elapsed() < Duration::from_millis(500)
+                });
                 self.press = None;
                 self.drag_grab = None;
                 if was_drag || self.pet.dragging {
                     self.pet.end_drag();
                 } else if was_pet {
                     self.pet.end_pet();
+                } else if short_click {
+                    // WebView: short click → mood-weighted trick / double-tap kiss.
+                    self.pet.on_short_click();
                 }
                 self.next_frame = Instant::now();
                 if let Some(w) = &self.window {

@@ -2,8 +2,11 @@
 
 #![allow(dead_code)] // shared ellipse/rect helpers + walking fallback body
 
-use crate::pet::{CoatColor, FlyerKind, GiftKind, Mode, Pet, Species, ToyKind};
+use crate::pet::{
+    CoatColor, FlyerKind, GiftKind, Mode, ParticleKind, Pet, Species, ToyKind,
+};
 use crate::sprite::{self, SpriteCache};
+use crate::text;
 
 pub const WIN: u32 = 180;
 
@@ -45,7 +48,8 @@ pub fn draw_pet(
         | Mode::Clingy
         | Mode::Interested
         | Mode::Chasing
-        | Mode::Playing => pet.walk_phase.sin() * 3.0,
+        | Mode::Playing
+        | Mode::Trick => pet.walk_phase.sin() * 3.0,
         Mode::Idle => (pet.idle_t * 1.6).sin() * 1.5,
         Mode::Pet => 0.0, // bob applied in pet tick via y
         Mode::Sleeping | Mode::InBed => (pet.sleep_t * 0.8).sin() * 0.8 + 6.0,
@@ -95,6 +99,16 @@ pub fn draw_pet(
             FlyerKind::Butterfly => draw_butterfly(buf, w, h, fx, fy, flyer.age),
         }
     }
+    for p in &pet.particles {
+        let (px, py) = to_local(p.x, p.y);
+        draw_particle(buf, w, h, px, py, p);
+    }
+
+    if let Some(b) = &pet.bubble {
+        let (bx, by) = to_local(pet.x, pet.y - 58.0);
+        draw_speech_bubble(buf, w, h, bx, by, b);
+    }
+
     if let Some(gift) = &pet.gift {
         let (gx, gy) = to_local(gift.x, gift.y);
         draw_gift(buf, w, h, gx, gy, gift.kind, gift.fade);
@@ -176,7 +190,7 @@ fn draw_walking(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
     let (ir, ig, ib) = ink(pet);
     let bob = pet.walk_phase.sin() * 3.0;
     let leg = pet.walk_phase.sin() * 6.0;
-    fill_ellipse(buf, w, h, cx, cy + bob, 38.0, 28.0, r, g, b);
+    fill_ellipse(buf, w, h, cx, cy + bob, 28.0, 21.0, r, g, b);
     fill_ellipse(
         buf,
         w,
@@ -768,6 +782,126 @@ fn draw_z(buf: &mut [u32], w: u32, h: u32, x: f64, y: f64, a: u8) {
             0x66,
         );
     }
+}
+
+fn draw_speech_bubble(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    cx: f64,
+    cy: f64,
+    bubble: &crate::pet::SpeechBubble,
+) {
+    const PX: f32 = 13.0;
+    let (tw, th) = text::measure(&bubble.text, PX);
+    let pad_x = 12.0;
+    let pad_y = 7.0;
+    let scale = bubble.pop_scale();
+    let bw = (tw as f64 + pad_x * 2.0) * scale;
+    let bh = (th as f64 + pad_y * 2.0).max(22.0) * scale;
+    let x0 = cx - bw * 0.5;
+    let y0 = cy - bh;
+    // White capsule + soft shadow tint.
+    fill_round_rect(buf, w, h, x0 + 1.0, y0 + 2.0, bw, bh, 11.0 * scale, 0xE8, 0xE0, 0xD8, 90);
+    fill_round_rect(buf, w, h, x0, y0, bw, bh, 11.0 * scale, 0xFF, 0xFF, 0xFF, 245);
+    // Tail triangle pointing down at pet.
+    let tx = cx;
+    let ty = y0 + bh;
+    fill_triangle_alpha(
+        buf,
+        w,
+        h,
+        tx - 5.0 * scale,
+        ty,
+        tx + 5.0 * scale,
+        ty,
+        tx,
+        ty + 7.0 * scale,
+        245,
+        0xFF,
+        0xFF,
+        0xFF,
+    );
+    let text_x = x0 + pad_x * scale;
+    let text_y = y0 + pad_y * scale * 0.6;
+    text::blit_text(
+        buf,
+        w,
+        h,
+        text_x,
+        text_y,
+        &bubble.text,
+        PX * scale as f32,
+        0x3A,
+        0x2A,
+        0x20,
+        1.0,
+    );
+}
+
+fn draw_particle(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    x: f64,
+    y: f64,
+    p: &crate::pet::Particle,
+) {
+    let a = (p.alpha() * 255.0) as u8;
+    if a < 8 {
+        return;
+    }
+    match p.kind {
+        ParticleKind::Heart | ParticleKind::Kiss => {
+            let label = if p.kind == ParticleKind::Kiss {
+                "💋"
+            } else {
+                "❤"
+            };
+            text::blit_text(buf, w, h, x - 6.0, y - 8.0, label, 14.0, 0xE0, 0x40, 0x70, p.alpha() as f32);
+        }
+        ParticleKind::Zzz => {
+            text::blit_text(buf, w, h, x, y, "Z", 12.0, 0x55, 0x44, 0x66, p.alpha() as f32);
+        }
+        ParticleKind::Dust => {
+            fill_ellipse_alpha(buf, w, h, x, y, 4.0 + p.t() * 6.0, 3.0 + p.t() * 4.0, a / 2, 0xC0, 0xB0, 0xA0);
+        }
+        ParticleKind::Footprint => {
+            fill_ellipse_alpha(buf, w, h, x, y, 4.0, 2.5, a / 3, 0x80, 0x70, 0x60);
+            fill_ellipse_alpha(buf, w, h, x + 5.0, y + 1.0, 3.5, 2.2, a / 3, 0x80, 0x70, 0x60);
+        }
+        ParticleKind::Mud => {
+            fill_ellipse_alpha(buf, w, h, x, y, 3.5, 3.0, a, 0x6B, 0x4E, 0x31);
+        }
+        ParticleKind::Dream => {
+            let label = p.label.unwrap_or("💤");
+            fill_round_rect(buf, w, h, x - 12.0, y - 10.0, 28.0, 22.0, 8.0, 0xFF, 0xFF, 0xFF, a);
+            text::blit_text(buf, w, h, x - 8.0, y - 8.0, label, 14.0, 0x3A, 0x2A, 0x20, p.alpha() as f32);
+        }
+    }
+}
+
+fn fill_round_rect(
+    buf: &mut [u32],
+    w: u32,
+    h: u32,
+    x: f64,
+    y: f64,
+    rw: f64,
+    rh: f64,
+    radius: f64,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    let rad = radius.min(rw * 0.5).min(rh * 0.5);
+    fill_rect_alpha(buf, w, h, x + rad, y, rw - rad * 2.0, rh, a, r, g, b);
+    fill_rect_alpha(buf, w, h, x, y + rad, rw, rh - rad * 2.0, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rad, y + rad, rad, rad, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rw - rad, y + rad, rad, rad, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rad, y + rh - rad, rad, rad, a, r, g, b);
+    fill_ellipse_alpha(buf, w, h, x + rw - rad, y + rh - rad, rad, rad, a, r, g, b);
 }
 
 fn fill_ellipse(

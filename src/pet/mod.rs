@@ -3,10 +3,14 @@
 
 use std::collections::VecDeque;
 
+mod bubble;
 mod mode;
+mod particle;
 mod rng;
 
-pub use mode::Mode;
+pub use bubble::SpeechBubble;
+pub use mode::{Mode, TrickAction};
+pub use particle::{Particle, ParticleKind};
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -426,10 +430,25 @@ pub struct Pet {
     last_sig_move_t: f64,
     last_clingy_t: f64,
     pub clingy_arrived: bool,
+    /// Speech bubble above the pet (WebView `#bubble`).
+    pub bubble: Option<SpeechBubble>,
+    pub particles: Vec<Particle>,
+    /// Soft mood 0..100 (trick weights + meow flavor).
+    pub mood: f64,
+    pub trick_action: Option<TrickAction>,
+    last_ambient_meow_t: f64,
+    last_tap_t: f64,
+    last_zzz_bubble_t: f64,
+    last_footprint_t: f64,
+    last_dream_t: f64,
+    /// One-shot flags so eat/gift bubbles don't spam.
+    ate_bubble_shown: bool,
+    kiss_particle_shown: bool,
 }
 
 impl Pet {
-    pub const SIZE: f64 = 160.0;
+    /// Footprint / clamp margin — matches WebView cat (~120 CSS px).
+    pub const SIZE: f64 = 120.0;
 
     pub fn new(screen_w: f64, screen_h: f64) -> Self {
         let x = screen_w * 0.5;
@@ -480,6 +499,17 @@ impl Pet {
             last_sig_move_t: 0.0,
             last_clingy_t: -120.0,
             clingy_arrived: false,
+            bubble: None,
+            particles: Vec::new(),
+            mood: 55.0,
+            trick_action: None,
+            last_ambient_meow_t: 0.0,
+            last_tap_t: -10.0,
+            last_zzz_bubble_t: -10.0,
+            last_footprint_t: -10.0,
+            last_dream_t: -10.0,
+            ate_bubble_shown: false,
+            kiss_particle_shown: false,
         }
     }
 
@@ -500,7 +530,8 @@ impl Pet {
         let half = BASE * 0.5;
         let mut min_x = self.x - half;
         let mut max_x = self.x + half;
-        let mut min_y = self.y - half;
+        // Extra headroom for speech bubbles above the pet.
+        let mut min_y = self.y - half - 56.0;
         let mut max_y = self.y + half;
 
         let mut include = |x: f64, y: f64, pad: f64| {
@@ -509,6 +540,14 @@ impl Pet {
             min_y = min_y.min(y - pad);
             max_y = max_y.max(y + pad);
         };
+
+        if let Some(b) = &self.bubble {
+            let tw = (b.text.chars().count() as f64 * 9.0).clamp(48.0, 160.0);
+            include(self.x, self.y - 70.0, tw * 0.5 + 12.0);
+        }
+        for p in &self.particles {
+            include(p.x, p.y, 20.0);
+        }
 
         if let Some(t) = &self.toy {
             include(t.x, t.y, 48.0);
@@ -594,6 +633,8 @@ impl Pet {
     pub fn wake(&mut self) {
         if self.mode.is_asleep() {
             self.transition(Mode::Idle);
+            // After idle-start bubble (if any) — waking message wins.
+            self.show_bubble("睡饱啦~", 1.5);
         }
     }
 
@@ -837,6 +878,7 @@ impl Pet {
         self.mode_until = 1.2;
         self.photo_t = 0.0;
         self.flash = 1.0;
+        self.show_bubble("茄子~ 📸", 1.3);
     }
 
     pub fn begin_drag(&mut self) {
@@ -862,6 +904,118 @@ impl Pet {
         self.force_scene = None;
     }
 
+    pub fn show_bubble(&mut self, text: impl Into<String>, dur: f64) {
+        self.bubble = Some(SpeechBubble {
+            text: text.into(),
+            age: 0.0,
+            dur,
+        });
+    }
+
+    pub fn clear_bubble(&mut self) {
+        self.bubble = None;
+    }
+
+    fn spawn_particle(&mut self, kind: ParticleKind, x: f64, y: f64, life: f64) {
+        self.particles.push(Particle::new(kind, x, y, life));
+    }
+
+    fn bump_mood(&mut self, delta: f64) {
+        self.mood = (self.mood + delta).clamp(0.0, 100.0);
+    }
+
+    /// Short click / double-tap → trick (WebView mouseup path).
+    pub fn on_short_click(&mut self) {
+        if matches!(
+            self.mode,
+            Mode::GoingHome | Mode::Feeding | Mode::Dragged | Mode::Photo | Mode::Trick
+        ) {
+            return;
+        }
+        if self.clock - self.last_tap_t < 0.35 {
+            self.last_tap_t = 0.0;
+            self.start_trick(TrickAction::Kiss);
+            return;
+        }
+        self.last_tap_t = self.clock;
+        self.bump_mood(2.0);
+        let action = self.pick_trick_action();
+        self.start_trick(action);
+    }
+
+    fn pick_trick_action(&self) -> TrickAction {
+        // Neutral mood weights (mood≈50): lean meow/heart like WebView mid mood.
+        const WEIGHTS: &[(TrickAction, f64)] = &[
+            (TrickAction::Meow, 0.20),
+            (TrickAction::Heart, 0.16),
+            (TrickAction::Spin, 0.12),
+            (TrickAction::Pounce, 0.09),
+            (TrickAction::HappyJump, 0.08),
+            (TrickAction::Grumpy, 0.08),
+            (TrickAction::Wave, 0.09),
+            (TrickAction::Shy, 0.09),
+            (TrickAction::SwatCursor, 0.09),
+        ];
+        let m = (self.mood / 100.0).clamp(0.0, 1.0);
+        // Blend toward happier weights when mood high.
+        let happy_boost = [0.0, 0.12, 0.04, 0.0, 0.08, -0.12, 0.04, -0.06, 0.02];
+        let mut total = 0.0;
+        let mut ws = [0.0; 9];
+        for (i, (_, w0)) in WEIGHTS.iter().enumerate() {
+            ws[i] = (w0 + happy_boost[i] * (m - 0.5) * 2.0).max(0.01);
+            total += ws[i];
+        }
+        let mut r = (fastrand_u64() as f64 / u64::MAX as f64) * total;
+        for (i, (action, _)) in WEIGHTS.iter().enumerate() {
+            r -= ws[i];
+            if r <= 0.0 {
+                return *action;
+            }
+        }
+        TrickAction::Meow
+    }
+
+    pub fn start_trick(&mut self, action: TrickAction) {
+        if self.dragging {
+            return;
+        }
+        self.force_scene = None;
+        if self.mode.is_asleep() {
+            self.wake();
+        }
+        self.kiss_particle_shown = false;
+        self.trick_action = Some(action);
+        self.mode = Mode::Trick;
+        self.mode_elapsed = 0.0;
+        self.mode_until = action.duration();
+        let rng = fastrand_u64();
+        match action {
+            TrickAction::Meow => {
+                let t = bubble::pick_meow(
+                    self.species,
+                    self.mood,
+                    false,
+                    self.cursor_move_amt,
+                    self.clock - self.last_sig_move_t,
+                    rng,
+                );
+                self.show_bubble(t, 1.3);
+            }
+            TrickAction::Heart => {
+                self.show_bubble(bubble::pick_hearts(rng), 1.5);
+                self.spawn_particle(ParticleKind::Heart, self.x, self.y - 30.0, 1.6);
+            }
+            TrickAction::Grumpy => self.show_bubble(bubble::pick_grumpy_line(rng), 1.2),
+            TrickAction::Wave => self.show_bubble(bubble::pick_wave(rng), 1.3),
+            TrickAction::Shy => self.show_bubble(bubble::pick_shy(rng), 1.4),
+            TrickAction::Kiss => self.show_bubble(bubble::pick_kiss(rng), 1.2),
+            TrickAction::Spin | TrickAction::Pounce | TrickAction::HappyJump => {}
+            TrickAction::SwatCursor => {
+                self.show_bubble("!", 0.7);
+            }
+        }
+    }
+
     /// Enter petting after a long press without dragging (~0.5s).
     pub fn start_pet(&mut self) {
         if self.dragging || self.mode == Mode::Pet {
@@ -875,10 +1029,13 @@ impl Pet {
         }
         self.mode = Mode::Pet;
         self.mode_elapsed = 0.0;
+        self.show_bubble("咕噜咕噜~", 10.0);
     }
 
     pub fn end_pet(&mut self) {
         if self.mode == Mode::Pet {
+            self.clear_bubble();
+            self.spawn_particle(ParticleKind::Heart, self.x + 8.0, self.y - 24.0, 1.5);
             self.transition(Mode::Idle);
         }
     }
@@ -928,6 +1085,16 @@ impl Pet {
     pub fn update(&mut self, dt: f64) {
         self.clock += dt;
         self.flash = (self.flash - dt * 2.2).max(0.0);
+        // Mood drifts toward neutral 50.
+        self.mood += (50.0 - self.mood) * dt * 0.003;
+
+        if let Some(b) = &mut self.bubble {
+            b.age += dt;
+            if !b.alive() {
+                self.bubble = None;
+            }
+        }
+        particle::tick_particles(&mut self.particles, dt);
 
         if self.dragging {
             self.mode = Mode::Dragged;
@@ -943,6 +1110,7 @@ impl Pet {
         }
 
         self.maybe_ambient_event(dt);
+        self.maybe_ambient_meow();
         self.maybe_clingy();
         self.maybe_react_to_cursor();
         self.phys_flyer(dt);
@@ -962,6 +1130,14 @@ impl Pet {
                 // Held; release from App ends it. Soft bob + tail phase while petted.
                 self.walk_phase = (self.walk_phase + dt * 6.0) % std::f64::consts::TAU;
                 self.y = self.floor_y + (self.mode_elapsed * 3.0).sin() * 1.2;
+                if fastrand_chance(0.04) {
+                    self.spawn_particle(
+                        ParticleKind::Heart,
+                        self.x + ((fastrand_u64() % 24) as f64 - 12.0),
+                        self.y - 28.0,
+                        1.5,
+                    );
+                }
             }
             Mode::Clingy => self.tick_clingy(dt),
             Mode::Dizzy => {
@@ -979,6 +1155,7 @@ impl Pet {
             Mode::BirdWatch => self.tick_bird_watch(dt),
             Mode::ButterflyNose => self.tick_butterfly_nose(dt),
             Mode::Gifting => self.tick_gifting(dt),
+            Mode::Trick => self.tick_trick(dt),
             Mode::Startled => {
                 if self.mode_elapsed > 0.7 {
                     self.transition(Mode::Idle);
@@ -990,6 +1167,72 @@ impl Pet {
                     self.transition(Mode::Idle);
                 }
             }
+        }
+    }
+
+    fn maybe_ambient_meow(&mut self) {
+        if !matches!(self.mode, Mode::Walking | Mode::Idle) {
+            return;
+        }
+        let gap = 35.0 + (fastrand_u64() % 35000) as f64 / 1000.0;
+        if self.clock - self.last_ambient_meow_t < gap {
+            return;
+        }
+        // Only when fairly calm / not mid-chase energy.
+        if self.cursor_move_amt > 80.0 {
+            return;
+        }
+        self.last_ambient_meow_t = self.clock;
+        self.show_bubble(bubble::pick_curious(self.species, fastrand_u64()), 1.1);
+    }
+
+    fn tick_trick(&mut self, dt: f64) {
+        let Some(action) = self.trick_action else {
+            self.transition(Mode::Idle);
+            return;
+        };
+        let t = (self.mode_elapsed / self.mode_until.max(0.01)).clamp(0.0, 1.0);
+        match action {
+            TrickAction::Spin => {
+                self.facing = if ((self.mode_elapsed * 8.0) as i32) % 2 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                self.walk_phase = (self.walk_phase + dt * 20.0) % std::f64::consts::TAU;
+                self.y = self.floor_y;
+            }
+            TrickAction::Pounce | TrickAction::HappyJump => {
+                let hop = if t < 0.45 {
+                    -(t / 0.45) * 22.0
+                } else {
+                    -22.0 * (1.0 - (t - 0.45) / 0.55)
+                };
+                self.y = self.floor_y + hop;
+                self.walk_phase = (self.walk_phase + dt * 14.0) % std::f64::consts::TAU;
+                if t > 0.5 && action == TrickAction::Pounce {
+                    self.spawn_particle(ParticleKind::Dust, self.x, self.floor_y + 18.0, 0.55);
+                }
+            }
+            TrickAction::Kiss => {
+                self.y = self.floor_y;
+                if !self.kiss_particle_shown && t > 0.35 {
+                    self.kiss_particle_shown = true;
+                    self.spawn_particle(ParticleKind::Kiss, self.x + self.facing * 10.0, self.y - 10.0, 1.4);
+                }
+            }
+            TrickAction::SwatCursor => {
+                self.y = self.floor_y - 8.0 * (1.0 - t);
+                self.walk_phase = (self.walk_phase + dt * 16.0) % std::f64::consts::TAU;
+            }
+            _ => {
+                self.y = self.floor_y;
+                self.walk_phase = (self.walk_phase + dt * 8.0) % std::f64::consts::TAU;
+            }
+        }
+        if self.mode_elapsed >= self.mode_until {
+            self.trick_action = None;
+            self.transition(Mode::Idle);
         }
     }
 
@@ -1202,12 +1445,31 @@ impl Pet {
         if dist < 28.0 {
             if feed.eat_t.is_none() {
                 feed.eat_t = Some(0.0);
+                self.ate_bubble_shown = false;
             }
             if let Some(t) = feed.eat_t.as_mut() {
                 *t += dt;
                 self.eat_anim_t = *t;
+                if *t > 0.35 && !self.ate_bubble_shown {
+                    self.ate_bubble_shown = true;
+                    self.show_bubble(bubble::eat_bubble(self.species), 1.5);
+                    self.bump_mood(match self.species {
+                        Species::Cat => 15.0,
+                        Species::Pig => 20.0,
+                        Species::Bear => 28.0,
+                    });
+                    for _ in 0..bubble::eat_heart_count(self.species) {
+                        self.spawn_particle(
+                            ParticleKind::Heart,
+                            self.x + ((fastrand_u64() % 20) as f64 - 10.0),
+                            self.y - 26.0,
+                            1.6,
+                        );
+                    }
+                }
                 if *t > 1.4 {
                     self.feed = None;
+                    self.show_bubble("嗝~", 0.9);
                     self.transition(Mode::Idle);
                     return;
                 }
@@ -1216,6 +1478,7 @@ impl Pet {
         } else {
             feed.eat_t = None;
             self.eat_anim_t = 0.0;
+            self.ate_bubble_shown = false;
             self.move_toward(feed.x, feed.y, 120.0 * self.speed_mul() * dt);
             if dx.abs() > 8.0 {
                 self.facing = dx.signum();
@@ -1238,6 +1501,7 @@ impl Pet {
         if self.mode_elapsed > self.mode_until || toy.age > max_age || toy.hits >= max_hits {
             self.toy = None;
             self.laser_trail.clear();
+            self.show_bubble(bubble::toy_done_bubble(fastrand_u64()), 1.2);
             self.pick_new_target();
             self.transition(Mode::Walking);
             return;
@@ -1386,6 +1650,8 @@ impl Pet {
                 self.mode_elapsed = 0.0;
                 self.floor_y = self.target_y;
                 self.y = self.floor_y;
+                self.show_bubble("给你的~♡", 2.0);
+                self.spawn_particle(ParticleKind::Heart, g.x, g.y - 20.0, 1.7);
             } else {
                 self.move_toward(tx, ty, 55.0 * self.speed_mul() * dt);
                 if dx.abs() > 8.0 {
@@ -1465,6 +1731,7 @@ impl Pet {
             }
             self.mode = Mode::Startled;
             self.mode_elapsed = 0.0;
+            self.show_bubble(bubble::pick(&["啊嚏!", "啾!", "atishoo!"], fastrand_u64()), 0.9);
         }
         let _ = dt;
     }
@@ -1750,6 +2017,15 @@ impl Pet {
         }
         self.x += dir * speed * dt;
         self.y = self.floor_y + self.walk_phase.sin() * 3.0;
+        if self.clock - self.last_footprint_t > 0.45 && fastrand_chance(0.35) {
+            self.last_footprint_t = self.clock;
+            self.spawn_particle(
+                ParticleKind::Footprint,
+                self.x - self.facing * 8.0,
+                self.floor_y + 22.0,
+                1.5,
+            );
+        }
 
         if (self.x - self.target_x).abs() < 4.0 {
             self.pick_new_target();
@@ -1797,7 +2073,9 @@ impl Pet {
     fn tick_sleeping(&mut self, dt: f64) {
         self.sleep_t += dt;
         self.y = self.floor_y + 8.0 + (self.sleep_t * 0.8).sin() * 0.8;
+        self.tick_sleep_fx();
         if self.mode_elapsed > 14.0 && fastrand_chance(0.02) {
+            self.show_bubble("睡饱啦~", 1.5);
             self.transition(Mode::Idle);
         }
     }
@@ -1828,8 +2106,37 @@ impl Pet {
     fn tick_in_bed(&mut self, dt: f64) {
         self.sleep_t += dt;
         self.y = self.floor_y + 4.0 + (self.sleep_t * 0.7).sin() * 0.6;
+        self.tick_sleep_fx();
         if self.mode_elapsed > 22.0 && fastrand_chance(0.01) {
+            self.show_bubble("睡饱啦~", 1.5);
             self.transition(Mode::Idle);
+        }
+    }
+
+    fn tick_sleep_fx(&mut self) {
+        if self.clock - self.last_zzz_bubble_t > 5.5 {
+            self.last_zzz_bubble_t = self.clock;
+            self.show_bubble(bubble::pick_sleepy(fastrand_u64()), 2.2);
+        }
+        if fastrand_chance(0.03) {
+            self.spawn_particle(
+                ParticleKind::Zzz,
+                self.x + 20.0 + ((fastrand_u64() % 16) as f64),
+                self.y - 28.0,
+                2.2,
+            );
+        }
+        if self.clock - self.last_dream_t > 8.0 && fastrand_chance(0.01) {
+            self.last_dream_t = self.clock;
+            let food = match self.species {
+                Species::Cat => "🐟",
+                Species::Pig => "🥕",
+                Species::Bear => "🍯",
+            };
+            self.particles.push(
+                Particle::new(ParticleKind::Dream, self.x + 12.0, self.y - 40.0, 2.6)
+                    .with_label(food),
+            );
         }
     }
 
@@ -1847,6 +2154,8 @@ impl Pet {
             }
             Mode::Sleeping | Mode::InBed => {
                 self.sleep_t = 0.0;
+                self.show_bubble(bubble::pick_sleepy(fastrand_u64()), 2.2);
+                self.last_zzz_bubble_t = self.clock;
             }
             Mode::Dizzy => {
                 self.dizzy_t = 0.0;
@@ -1887,6 +2196,19 @@ impl Pet {
             } else {
                 1.0
             };
+        }
+        if let Some(text) = bubble::idle_start_bubble(self.idle_action, self.species) {
+            self.show_bubble(text, 1.4);
+        }
+        if self.idle_action == IdleAction::MudRoll {
+            for _ in 0..3 {
+                self.spawn_particle(
+                    ParticleKind::Mud,
+                    self.x + ((fastrand_u64() % 30) as f64 - 15.0),
+                    self.y + 10.0,
+                    0.7,
+                );
+            }
         }
     }
 
@@ -2028,5 +2350,40 @@ mod tests {
                 pet.x
             );
         }
+    }
+
+    #[test]
+    fn show_bubble_expires() {
+        rng::seed(6);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.show_bubble("喵~", 0.5);
+        assert!(pet.bubble.is_some());
+        for _ in 0..40 {
+            pet.update(1.0 / 60.0);
+        }
+        assert!(pet.bubble.is_none(), "bubble should expire");
+    }
+
+    #[test]
+    fn short_click_enters_trick() {
+        rng::seed(7);
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.mode = Mode::Idle;
+        pet.on_short_click();
+        assert_eq!(pet.mode, Mode::Trick);
+        assert!(pet.trick_action.is_some());
+        assert!(
+            pet.bubble.is_some()
+                || matches!(
+                    pet.trick_action,
+                    Some(
+                        TrickAction::Spin
+                            | TrickAction::Pounce
+                            | TrickAction::HappyJump
+                            | TrickAction::SwatCursor
+                    )
+                ),
+            "meow/heart/etc should speak; silent actions ok"
+        );
     }
 }

@@ -14,6 +14,7 @@ winit = "0.30"
 tray-icon = "0.19"
 raw-window-handle = "0.6"
 resvg = "0.44"
+fontdue = "0.9"
 
 # softbuffer ignores alpha on macOS (NoneSkipFirst) — we present via CALayer there.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
