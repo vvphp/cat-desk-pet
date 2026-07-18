@@ -1,6 +1,6 @@
 [package]
 name = "cat-desk-pet"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "摸鱼猫 — native small-window desktop pet (no WebView)"
 publish = false

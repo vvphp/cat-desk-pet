@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "cat-desk-pet"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "fontdue",
  "objc2 0.6.4",
