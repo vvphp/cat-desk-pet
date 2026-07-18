@@ -88,7 +88,7 @@ warm 5s + 采样 30s。
 | README 架构与构建说明更新 | ✅ |
 
 产物：`target/release/cat-desk-pet`  
-打包：`dist/macos/CatDeskPet.app`、`CatDeskPet.dmg`
+打包：`dist/macos/摸鱼猫.app`、`摸鱼猫.dmg`
 
 ## 绘制路径（SVG）
 

@@ -1,4 +1,4 @@
-//! Cat Desk Pet — native small-window pet. No WebView.
+//! 摸鱼猫 — native small-window pet. No WebView.
 //!
 //! From repo root:
 //!   npm run dev
@@ -524,7 +524,7 @@ impl ApplicationHandler<UserEvent> for App {
             let icon = tray_icon_from_orange();
             let tray = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
-                .with_tooltip("Cat Desk Pet")
+                .with_tooltip("摸鱼猫")
                 .with_icon(icon)
                 .build()
                 .ok();
@@ -569,7 +569,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let attrs = Window::default_attributes()
-            .with_title("Cat Desk Pet")
+            .with_title("摸鱼猫")
             .with_inner_size(LogicalSize::new(WIN, WIN))
             .with_decorations(false)
             .with_transparent(true)

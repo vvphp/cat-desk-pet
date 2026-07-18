@@ -4,7 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/dist/macos"
-APP_NAME="CatDeskPet"
+# Finder / Dock display name (Chinese product name).
+APP_NAME="摸鱼猫"
 BIN_NAME="cat-desk-pet"
 APP="$OUT/$APP_NAME.app"
 BIN="$ROOT/target/release/$BIN_NAME"
@@ -21,6 +22,8 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 rm -rf "$APP"
+# Also drop the old English-named bundle if present.
+rm -rf "$OUT/CatDeskPet.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/$BIN_NAME"
@@ -38,7 +41,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key>
-  <string>en</string>
+  <string>zh-Hans</string>
   <key>CFBundleExecutable</key>
   <string>${BIN_NAME}</string>
   <key>CFBundleIdentifier</key>
@@ -46,6 +49,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
+  <string>${APP_NAME}</string>
+  <key>CFBundleDisplayName</key>
   <string>${APP_NAME}</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
@@ -65,7 +70,7 @@ echo "==> app: $APP"
 
 if command -v hdiutil >/dev/null 2>&1; then
   DMG="$OUT/$APP_NAME.dmg"
-  rm -f "$DMG"
+  rm -f "$DMG" "$OUT/CatDeskPet.dmg"
   hdiutil create -volname "$APP_NAME" -srcfolder "$APP" -ov -format UDZO "$DMG" >/dev/null
   echo "==> dmg: $DMG"
 fi

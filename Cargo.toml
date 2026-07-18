@@ -2,7 +2,7 @@
 name = "cat-desk-pet"
 version = "1.0.0"
 edition = "2021"
-description = "Cat Desk Pet — native small-window desktop pet (no WebView)"
+description = "摸鱼猫 — native small-window desktop pet (no WebView)"
 publish = false
 
 [[bin]]

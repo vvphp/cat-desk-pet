@@ -1,13 +1,14 @@
 <div align="center">
 
-![Cat Desk Pet](docs/banner.png)
+![摸鱼猫](docs/banner.png)
 
-# 🐾 Cat Desk Pet
+# 🐾 摸鱼猫 (Moyu Cat)
 
 [简体中文](README.md) · **English**
 
 **A hand-drawn little animal that lives on your desktop.**  
-Native small window · Rust state machine · SVG (resvg) · **no WebView**
+Native small window · Rust state machine · SVG (resvg) · **no WebView**  
+Product name: **摸鱼猫** · macOS package: `摸鱼猫.app` / `摸鱼猫.dmg`
 
 </div>
 
