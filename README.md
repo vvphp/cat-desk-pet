@@ -41,7 +41,7 @@ cargo run --release          # 或 npm run dev
 ./tools/package-macos.sh     # → dist/macos/CatDeskPet.app + .dmg
 ```
 
-打 tag 发版：`git tag v2.0.0 && git push origin v2.0.0`（见 `.github/workflows/release.yml`）。
+打 tag 发版：`git tag v1.0.0 && git push origin v1.0.0`（见 `.github/workflows/release.yml`）。
 
 ## 架构摘要
 
