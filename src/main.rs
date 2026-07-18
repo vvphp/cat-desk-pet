@@ -800,18 +800,23 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                if let Some((ox, oy)) = self.drag_grab {
-                    if let Some(window) = self.window.clone() {
-                        let outer = window
-                            .outer_position()
-                            .unwrap_or(PhysicalPosition::new(0, 0));
-                        let scale = window.scale_factor();
-                        let desk_x = outer.x as f64 / scale + position.x / scale;
-                        let desk_y = outer.y as f64 / scale + position.y / scale;
-                        self.pet.drag_to(desk_x - ox, desk_y - oy);
-                        self.sync_window_pos(true);
-                        self.next_frame = Instant::now();
-                        window.request_redraw();
+                // Only drag after promote (>8px). Setting grab on mousedown made
+                // sub-threshold jitter call drag_to and rewrite floor_y.
+                let dragging = self.press.as_ref().is_some_and(|p| p.dragging);
+                if dragging {
+                    if let Some((ox, oy)) = self.drag_grab {
+                        if let Some(window) = self.window.clone() {
+                            let outer = window
+                                .outer_position()
+                                .unwrap_or(PhysicalPosition::new(0, 0));
+                            let scale = window.scale_factor();
+                            let desk_x = outer.x as f64 / scale + position.x / scale;
+                            let desk_y = outer.y as f64 / scale + position.y / scale;
+                            self.pet.drag_to(desk_x - ox, desk_y - oy);
+                            self.sync_window_pos(true);
+                            self.next_frame = Instant::now();
+                            window.request_redraw();
+                        }
                     }
                 } else {
                     self.update_passthrough();
@@ -849,7 +854,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     dragging: false,
                                     petting: false,
                                 });
-                                self.drag_grab = Some((dx - self.pet.x, dy - self.pet.y));
+                                // drag_grab is set only after >8px promote (see CursorMoved).
                             }
                             #[cfg(target_os = "macos")]
                             {
