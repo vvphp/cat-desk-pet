@@ -112,6 +112,9 @@ const WIN_MOVE_THRESHOLD: f64 = 6.0;
 const WIN_MOVE_MIN_INTERVAL: Duration = Duration::from_millis(80);
 /// Shared alpha hit pad for passthrough capture and click/context menu.
 const PET_HIT_PAD: i32 = 4;
+/// Leave-capture ellipse scale (enter uses 1.0). Stops bob/orbit from
+/// flipping `ignoresMouseEvents` every frame under the cursor.
+const PET_HIT_LEAVE_SCALE: f64 = 1.4;
 
 impl App {
     fn new(screen_w: f64, screen_h: f64) -> Self {
@@ -345,8 +348,16 @@ impl App {
             // Large drawable stays click-through except over the pet body ellipse
             // — so toys/flyers/transparent strips never block the desktop, but a
             // click on the cat is swallowed by us (not Finder underneath).
+            // Hysteresis: enter on the tight ellipse, leave only outside a fatter
+            // one — otherwise walk bob / Interested orbit flips ignore every tick
+            // and the window/sprite looks like it's shaking under the cursor.
+            let scale = if self.ignore_mouse {
+                1.0
+            } else {
+                PET_HIT_LEAVE_SCALE
+            };
             let over = macos::cursor_logical_top_left()
-                .map(|(cx, cy)| self.hits_pet_body(cx, cy))
+                .map(|(cx, cy)| self.hits_pet_body_scaled(cx, cy, scale))
                 .unwrap_or(false);
             let want_ignore = !over;
             if want_ignore != self.ignore_mouse {
@@ -358,10 +369,14 @@ impl App {
 
     /// Tight body hit in desktop logical coords (props / transparent canvas ignored).
     fn hits_pet_body(&self, desk_x: f64, desk_y: f64) -> bool {
+        self.hits_pet_body_scaled(desk_x, desk_y, 1.0)
+    }
+
+    fn hits_pet_body_scaled(&self, desk_x: f64, desk_y: f64, scale: f64) -> bool {
         let dx = desk_x - self.pet.x;
         let dy = desk_y - self.pet.y;
-        let rx = 52.0 + PET_HIT_PAD as f64;
-        let ry = 44.0 + PET_HIT_PAD as f64;
+        let rx = (52.0 + PET_HIT_PAD as f64) * scale;
+        let ry = (44.0 + PET_HIT_PAD as f64) * scale;
         (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
     }
 

@@ -1084,17 +1084,22 @@ impl Pet {
         let active = self.cursor_move_amt > 60.0;
         let fast = self.cursor_move_amt > 220.0;
 
+        // Cursor already on the body: stay put so hover/click doesn't chase us away.
+        const ON_BODY: f64 = 64.0;
+
         match self.mode {
             Mode::Walking | Mode::Idle => {
-                if active && dist < 280.0 {
+                if active && dist > ON_BODY && dist < 280.0 {
                     self.transition(Mode::Interested);
                 } else if fast && dist >= 280.0 && dist < 900.0 {
                     self.transition(Mode::Watching);
                 }
             }
             Mode::Interested => {
-                // escalate: close + very active → chase
-                if fast && dist < 320.0 && self.mode_elapsed > 0.4 {
+                if dist < ON_BODY {
+                    self.transition(Mode::Idle);
+                } else if fast && dist < 320.0 && self.mode_elapsed > 0.4 {
+                    // escalate: close + very active → chase
                     self.transition(Mode::Chasing);
                 } else if !active || dist > 380.0 || self.mode_elapsed > self.mode_until {
                     self.pick_new_target();
@@ -1122,6 +1127,15 @@ impl Pet {
             self.transition(Mode::Walking);
             return;
         };
+        let dist = ((cx - self.x).powi(2) + (cy - self.y).powi(2)).sqrt();
+        // Pointer on us: freeze orbit so hover doesn't look like a shake.
+        if dist < 64.0 {
+            self.y = self.floor_y;
+            if (cx - self.x).abs() > 18.0 {
+                self.facing = (cx - self.x).signum();
+            }
+            return;
+        }
         self.interested_jitter += dt * 1.5;
         self.walk_phase = (self.walk_phase + dt * 9.0) % (std::f64::consts::TAU);
         let desired = 110.0;
