@@ -85,17 +85,18 @@ pub fn draw_pet(
 
         let sprite = sprites.pixels_for(pet, s);
         if !sprite.is_empty() {
-            // Sprite path scales dest itself (dpr raster, not via DRAW_SCALE).
+            // Dest uses the same quantized d as the pixmap (not raw window scale).
+            let d = sprite::layout_scale(s);
             sprite::blit_sprite(
                 buf,
                 w,
                 h,
                 sprite,
                 pet.facing,
-                bob * s,
-                cx * s,
-                cy * s,
-                s,
+                bob * d,
+                cx * d,
+                cy * d,
+                d,
             );
         } else {
             draw_walking(buf, w, h, cx, cy + bob, pet);

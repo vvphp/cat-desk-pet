@@ -114,6 +114,11 @@ fn dpr_of(q: u8) -> f64 {
     q as f64 / 4.0
 }
 
+/// Same quantized DPR used for sprite raster size and blit placement.
+pub fn layout_scale(scale: f64) -> f64 {
+    dpr_of(dpr_quant(scale))
+}
+
 fn cache_cap(dpr_q: u8) -> usize {
     if dpr_of(dpr_q) >= 1.5 {
         MAX_CACHE_RETINA
