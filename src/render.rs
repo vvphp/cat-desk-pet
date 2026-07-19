@@ -572,7 +572,8 @@ fn draw_line_alpha(
     if len < 0.5 {
         return;
     }
-    let steps = (len * 1.5).ceil() as i32;
+    // Sample in physical space: fill_ellipse_alpha multiplies coords by DRAW_SCALE.
+    let steps = (len * 1.5 * draw_scale()).ceil().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f64 / steps as f64;
         let x = x0 + dx * t;

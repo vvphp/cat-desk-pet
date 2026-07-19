@@ -7,8 +7,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::TAU;
 
-/// Max cached rasters (~53KB at 1× / ~211KB at 2×). Cap lower at Retina.
-const MAX_CACHE: usize = 32;
+/// Base LRU cap at 1× (~53KB/slot). Retina uses a higher cap — re-raster is dearer.
+const MAX_CACHE_1X: usize = 32;
+const MAX_CACHE_RETINA: usize = 48;
 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{Options, Tree};
@@ -32,7 +33,7 @@ struct SpriteKey {
     /// Front-leg Y translate in SVG units, quantized (≈1).
     leg_fl_q: i8,
     leg_fr_q: i8,
-    /// Device pixel ratio bucket (1..=3) for Retina rasters.
+    /// Device pixel ratio in quarter-units (4=1.0 … 12=3.0) — shared by raster + blit.
     dpr_q: u8,
 }
 
@@ -87,7 +88,8 @@ impl SpriteCache {
                 self.order.push_back(k);
             }
         } else {
-            while self.cache.len() >= MAX_CACHE {
+            let cap = cache_cap(key.dpr_q);
+            while self.cache.len() >= cap {
                 if let Some(old) = self.order.pop_front() {
                     self.cache.remove(&old);
                 } else {
@@ -103,13 +105,29 @@ impl SpriteCache {
     }
 }
 
+/// Quantize DPR to 0.25 steps so pixmap size and blit layout share one `d`.
 fn dpr_quant(scale: f64) -> u8 {
-    scale.round().clamp(1.0, 3.0) as u8
+    ((scale.clamp(1.0, 3.0) * 4.0).round() as i32).clamp(4, 12) as u8
 }
 
-fn sprite_px(dpr: u8) -> (u32, u32) {
-    let d = dpr.max(1) as u32;
-    (SPRITE_W * d, SPRITE_H * d)
+fn dpr_of(q: u8) -> f64 {
+    q as f64 / 4.0
+}
+
+fn cache_cap(dpr_q: u8) -> usize {
+    if dpr_of(dpr_q) >= 1.5 {
+        MAX_CACHE_RETINA
+    } else {
+        MAX_CACHE_1X
+    }
+}
+
+fn sprite_px(dpr_q: u8) -> (u32, u32) {
+    let d = dpr_of(dpr_q);
+    (
+        (SPRITE_W as f64 * d).round().max(1.0) as u32,
+        (SPRITE_H as f64 * d).round().max(1.0) as u32,
+    )
 }
 
 fn key_for(pet: &Pet, scale: f64) -> SpriteKey {
