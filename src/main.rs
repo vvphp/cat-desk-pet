@@ -81,8 +81,7 @@ struct App {
     sprites: SpriteCache,
     /// Logical canvas (straight ARGB).
     pixels: Vec<u32>,
-    /// Physical buffer for Retina upscale / present (non-macOS softbuffer path).
-    #[cfg(not(target_os = "macos"))]
+    /// Physical buffer for Retina upscale / present.
     present_buf: Vec<u32>,
     last_tick: Instant,
     next_frame: Instant,
@@ -136,7 +135,6 @@ impl App {
             pet: Pet::new(screen_w, screen_h),
             sprites: SpriteCache::new(),
             pixels: vec![0; (WIN * WIN) as usize],
-            #[cfg(not(target_os = "macos"))]
             present_buf: Vec::new(),
             last_tick: now,
             next_frame: now,
@@ -220,11 +218,16 @@ impl App {
             return;
         };
 
-        // Paint in logical view space (capped; see `Pet::visible_bounds`).
+        // Paint in logical view space (capped; see `Pet::visible_bounds`), then
+        // nearest-neighbor upscale to physical pixels for Retina. Logical-only
+        // present + contentsScale made bubble/text edges severely jagged.
         // Use committed view size (not lagging inner_size) so a pending
         // request_inner_size can't present one wrong frame while the OS catches up.
         let lw = self.view_w.max(1);
         let lh = self.view_h.max(1);
+        let scale = window.scale_factor().max(0.01);
+        let pw = ((lw as f64) * scale).round().max(1.0) as u32;
+        let ph = ((lh as f64) * scale).round().max(1.0) as u32;
         let need = (lw as usize).saturating_mul(lh as usize);
         if self.pixels.len() != need {
             self.pixels.resize(need, 0);
@@ -244,27 +247,23 @@ impl App {
             &mut self.sprites,
         );
 
+        let phys = (pw as usize).saturating_mul(ph as usize);
+        if self.present_buf.len() != phys {
+            self.present_buf.resize(phys, 0);
+        }
+        if pw != lw || ph != lh {
+            blit_nn(&self.pixels, lw, lh, &mut self.present_buf, pw, ph);
+        } else {
+            self.present_buf.copy_from_slice(&self.pixels[..need]);
+        }
+
         #[cfg(target_os = "macos")]
         {
-            // Present logical pixels; CALayer `contentsScale` upscales on Retina.
-            // Avoids a full physical present_buf (+premuls) every frame.
-            macos::present_argb(&window, &self.pixels, lw, lh);
+            macos::present_argb(&window, &self.present_buf, pw, ph);
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            let scale = window.scale_factor().max(0.01);
-            let pw = ((lw as f64) * scale).round().max(1.0) as u32;
-            let ph = ((lh as f64) * scale).round().max(1.0) as u32;
-            let phys = (pw as usize).saturating_mul(ph as usize);
-            if self.present_buf.len() != phys {
-                self.present_buf.resize(phys, 0);
-            }
-            if pw != lw || ph != lh {
-                blit_nn(&self.pixels, lw, lh, &mut self.present_buf, pw, ph);
-            } else {
-                self.present_buf.copy_from_slice(&self.pixels[..need]);
-            }
             let Some(surface) = &mut self.surface else {
                 return;
             };
@@ -1059,8 +1058,7 @@ impl App {
     }
 }
 
-/// Nearest-neighbor blit from a logical canvas to a physical softbuffer.
-#[cfg(not(target_os = "macos"))]
+/// Nearest-neighbor blit from a logical canvas to a physical present buffer.
 fn blit_nn(src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32) {
     let need = (dw * dh) as usize;
     if dst.len() < need || sw == 0 || sh == 0 {

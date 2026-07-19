@@ -102,8 +102,9 @@ pub fn set_window_alpha(window: &Window, alpha: f64) {
 
 /// Present straight ARGB `0xAARRGGBB` pixels with real transparency via CALayer.
 ///
-/// Prefer **logical** pixel buffers and let `contentsScale` upscale on Retina —
-/// that cuts present memory ~4× vs nearest-neighbor into a physical buffer.
+/// Callers should pass a **physical** (Retina) buffer sized `logical × scale_factor`
+/// so edges stay sharp. `contentsScale` tells Core Animation the buffer is already
+/// in device pixels. View size is capped (`MAX_EDGE`), so peak RSS stays bounded.
 ///
 /// softbuffer 0.4's macOS backend uses `CGImageAlphaInfo::NoneSkipFirst`, which
 /// turns clear pixels into an opaque black square — so we present ourselves.
@@ -124,7 +125,7 @@ pub fn present_argb(window: &Window, pixels: &[u32], width: u32, height: u32) {
         return;
     };
     layer.setOpaque(false);
-    // Logical buffer + scale → Core Animation upscales; sharp enough for the pet.
+    // Physical buffer + matching scale → 1:1 device pixels (no CA upscale blur).
     layer.setContentsScale(window.scale_factor());
 
     let mut buf = take_premul_buf(need);

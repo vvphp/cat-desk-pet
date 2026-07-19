@@ -350,17 +350,22 @@ fn fill_triangle_alpha(
     g: u8,
     b: u8,
 ) {
-    let min_x = x0.min(x1).min(x2).floor().max(0.0) as i32;
-    let max_x = x0.max(x1).max(x2).ceil().min(w as f64 - 1.0) as i32;
-    let min_y = y0.min(y1).min(y2).floor().max(0.0) as i32;
-    let max_y = y0.max(y1).max(y2).ceil().min(h as f64 - 1.0) as i32;
-    let c = pack(a, r, g, b);
+    let min_x = (x0.min(x1).min(x2) - 1.0).floor().max(0.0) as i32;
+    let max_x = (x0.max(x1).max(x2) + 1.0).ceil().min(w as f64 - 1.0) as i32;
+    let min_y = (y0.min(y1).min(y2) - 1.0).floor().max(0.0) as i32;
+    let max_y = (y0.max(y1).max(y2) + 1.0).ceil().min(h as f64 - 1.0) as i32;
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let px = x as f64 + 0.5;
             let py = y as f64 + 0.5;
-            if point_in_tri(px, py, x0, y0, x1, y1, x2, y2) {
-                put(buf, w, h, x as u32, y as u32, c);
+            let sd = sd_triangle(px, py, x0, y0, x1, y1, x2, y2);
+            let cov = (0.5 - sd).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+            let aa = ((a as f64) * cov).round().clamp(0.0, 255.0) as u8;
+            if aa > 0 {
+                blend_over(buf, w, h, x as u32, y as u32, aa, r, g, b);
             }
         }
     }
@@ -895,13 +900,100 @@ fn fill_round_rect(
     b: u8,
     a: u8,
 ) {
-    let rad = radius.min(rw * 0.5).min(rh * 0.5);
-    fill_rect_alpha(buf, w, h, x + rad, y, rw - rad * 2.0, rh, a, r, g, b);
-    fill_rect_alpha(buf, w, h, x, y + rad, rw, rh - rad * 2.0, a, r, g, b);
-    fill_ellipse_alpha(buf, w, h, x + rad, y + rad, rad, rad, a, r, g, b);
-    fill_ellipse_alpha(buf, w, h, x + rw - rad, y + rad, rad, rad, a, r, g, b);
-    fill_ellipse_alpha(buf, w, h, x + rad, y + rh - rad, rad, rad, a, r, g, b);
-    fill_ellipse_alpha(buf, w, h, x + rw - rad, y + rh - rad, rad, rad, a, r, g, b);
+    if rw <= 0.0 || rh <= 0.0 || a == 0 {
+        return;
+    }
+    let rad = radius.min(rw * 0.5).min(rh * 0.5).max(0.0);
+    let x0 = (x - 1.0).floor().max(0.0) as i32;
+    let y0 = (y - 1.0).floor().max(0.0) as i32;
+    let x1 = (x + rw + 1.0).ceil().min(w as f64 - 1.0) as i32;
+    let y1 = (y + rh + 1.0).ceil().min(h as f64 - 1.0) as i32;
+    let cx = x + rw * 0.5;
+    let cy = y + rh * 0.5;
+    let half_w = rw * 0.5;
+    let half_h = rh * 0.5;
+    for py in y0..=y1 {
+        for px in x0..=x1 {
+            let sd = sd_rounded_box(
+                px as f64 + 0.5 - cx,
+                py as f64 + 0.5 - cy,
+                half_w,
+                half_h,
+                rad,
+            );
+            let cov = (0.5 - sd).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+            let aa = ((a as f64) * cov).round().clamp(0.0, 255.0) as u8;
+            if aa > 0 {
+                blend_over(buf, w, h, px as u32, py as u32, aa, r, g, b);
+            }
+        }
+    }
+}
+
+/// Signed distance to a rounded box centered at origin (IQ).
+fn sd_rounded_box(px: f64, py: f64, half_w: f64, half_h: f64, rad: f64) -> f64 {
+    let bx = (half_w - rad).max(0.0);
+    let by = (half_h - rad).max(0.0);
+    let qx = px.abs() - bx;
+    let qy = py.abs() - by;
+    let ox = qx.max(0.0);
+    let oy = qy.max(0.0);
+    ox.hypot(oy) + qx.min(qy).min(0.0) - rad
+}
+
+/// Approximate signed distance to a triangle (negative inside).
+fn sd_triangle(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    let d0 = sd_segment(px, py, x0, y0, x1, y1);
+    let d1 = sd_segment(px, py, x1, y1, x2, y2);
+    let d2 = sd_segment(px, py, x2, y2, x0, y0);
+    let d = d0.min(d1).min(d2);
+    if point_in_tri(px, py, x0, y0, x1, y1, x2, y2) {
+        -d
+    } else {
+        d
+    }
+}
+
+fn sd_segment(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let pax = px - ax;
+    let pay = py - ay;
+    let bax = bx - ax;
+    let bay = by - ay;
+    let denom = bax * bax + bay * bay;
+    let h = if denom <= 1e-12 {
+        0.0
+    } else {
+        ((pax * bax + pay * bay) / denom).clamp(0.0, 1.0)
+    };
+    let dx = pax - bax * h;
+    let dy = pay - bay * h;
+    dx.hypot(dy)
+}
+
+fn blend_over(buf: &mut [u32], w: u32, h: u32, x: u32, y: u32, a: u8, r: u8, g: u8, b: u8) {
+    if x >= w || y >= h || a == 0 {
+        return;
+    }
+    let i = (y * w + x) as usize;
+    if a == 255 {
+        buf[i] = pack(255, r, g, b);
+        return;
+    }
+    let dst = buf[i];
+    let da = (dst >> 24) & 0xff;
+    let dr = (dst >> 16) & 0xff;
+    let dg = (dst >> 8) & 0xff;
+    let db = dst & 0xff;
+    let aa = a as u32;
+    let inv = 255 - aa;
+    let out_a = aa + (da * inv) / 255;
+    let out_r = (r as u32 * aa + dr * inv) / 255;
+    let out_g = (g as u32 * aa + dg * inv) / 255;
+    let out_b = (b as u32 * aa + db * inv) / 255;
+    buf[i] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
 }
 
 fn fill_ellipse(

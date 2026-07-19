@@ -30,7 +30,7 @@ cargo run --release -- --mode sleeping   # sleeping | idle | walking
 ### 内存尖峰（issue #3）
 
 - 可绘制窗边长硬顶 ~480；远距飞鸟/激光拖尾裁切，不再把主窗拉到接近全屏
-- macOS `present_argb`：逻辑像素 + `contentsScale`，premull 缓冲回收复用（CGImage 持有所有权）
+- macOS `present_argb`：逻辑绘制后 NN 到物理像素再 present（`contentsScale` 匹配，避免气泡锯齿）；premull 缓冲回收复用（CGImage 持有所有权）。窗边硬顶后物理缓冲仍远低于 200MB
 - 气泡字体改为打包 Noto 子集 `assets/fonts/pet-ui.ttf`（~26KB，OFL，含 ♡❤♪ω∇），不再整文件加载 Arial Unicode（~22MB）
 
 ### 实测 — 2026-07-19 / issue #3（release）
