@@ -933,7 +933,7 @@ fn fill_round_rect(
     }
 }
 
-/// Signed distance to a rounded box centered at origin (IQ).
+/// Signed distance to a rounded box centered at origin (Inigo Quilez).
 fn sd_rounded_box(px: f64, py: f64, half_w: f64, half_h: f64, rad: f64) -> f64 {
     let bx = (half_w - rad).max(0.0);
     let by = (half_h - rad).max(0.0);
@@ -941,7 +941,8 @@ fn sd_rounded_box(px: f64, py: f64, half_w: f64, half_h: f64, rad: f64) -> f64 {
     let qy = py.abs() - by;
     let ox = qx.max(0.0);
     let oy = qy.max(0.0);
-    ox.hypot(oy) + qx.min(qy).min(0.0) - rad
+    // Must be min(max(qx,qy), 0) — min(min(...), 0) inflates the box badly.
+    ox.hypot(oy) + qx.max(qy).min(0.0) - rad
 }
 
 /// Approximate signed distance to a triangle (negative inside).
