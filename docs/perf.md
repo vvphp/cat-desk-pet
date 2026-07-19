@@ -25,7 +25,13 @@ cargo run --release -- --mode sleeping   # sleeping | idle | walking
 
 - OS 窗位提交节流：漂移 ≥6px 且间隔 ≥80ms 才 `set_outer_position`
 - 窗内像素偏移补偿，走路动画仍跟逻辑坐标
-- walking 画帧 25fps；穿透轮询随模式降频
+- walking 画帧 ~18fps；穿透轮询随模式降频
+
+### 内存尖峰（issue #3）
+
+- 可绘制窗边长硬顶 ~480；远距飞鸟/激光拖尾裁切，不再把主窗拉到接近全屏
+- macOS `present_argb`：逻辑像素 + `contentsScale`，premull 双缓冲复用（无每帧 `Vec::collect`）
+- 气泡字体改为打包 Noto Sans SC 子集 `assets/fonts/pet-ui.ttf`（~42KB，OFL），不再整文件加载 Arial Unicode（~22MB）
 
 ### 实测 — 2026-07-18 / Apple M5（v2）
 

@@ -522,19 +522,31 @@ impl Pet {
         self.clamp_pos();
     }
 
-    /// Desktop-logical axis-aligned bounds that must stay visible (pet + world props).
-    /// Used to grow the small window so toys / flyers aren't clipped.
+    /// Desktop-logical axis-aligned bounds that must stay visible (pet + nearby props).
+    ///
+    /// Far flyers / laser trails are clipped instead of growing the OS window toward
+    /// full-monitor size (that path allocated multi‑hundred MB Retina present buffers).
     pub fn visible_bounds(&self) -> (f64, f64, f64, f64) {
         // Match the idle pet window (~180²) footprint around the pet.
         const BASE: f64 = 180.0;
+        /// Hard cap on either edge — keeps present buffers bounded on Retina.
+        const MAX_EDGE: f64 = 480.0;
+        /// Only expand for props within this distance of the pet center (+ pad).
+        const NEAR: f64 = 200.0;
+
         let half = BASE * 0.5;
         let mut min_x = self.x - half;
         let mut max_x = self.x + half;
         // Extra headroom for speech bubbles above the pet.
         let mut min_y = self.y - half - 56.0;
         let mut max_y = self.y + half;
+        let cx = self.x;
+        let cy = self.y;
 
         let mut include = |x: f64, y: f64, pad: f64| {
+            if (x - cx).abs() > NEAR + pad || (y - cy).abs() > NEAR + pad {
+                return;
+            }
             min_x = min_x.min(x - pad);
             max_x = max_x.max(x + pad);
             min_y = min_y.min(y - pad);
@@ -570,6 +582,16 @@ impl Pet {
             include(self.home_x, self.home_y, 70.0);
         }
 
+        // Cap to a pet-centered MAX_EDGE box so one far prop can't force a huge canvas.
+        if max_x - min_x > MAX_EDGE {
+            min_x = cx - MAX_EDGE * 0.5;
+            max_x = min_x + MAX_EDGE;
+        }
+        if max_y - min_y > MAX_EDGE {
+            min_y = cy - MAX_EDGE * 0.5;
+            max_y = min_y + MAX_EDGE;
+        }
+
         // Clamp to screen so the OS window never exceeds the desktop.
         min_x = min_x.max(0.0);
         min_y = min_y.max(0.0);
@@ -582,6 +604,17 @@ impl Pet {
         if max_y - min_y < BASE {
             max_y = (min_y + BASE).min(self.screen_h);
             min_y = (max_y - BASE).max(0.0);
+        }
+        // Re-apply edge cap after screen clamp (narrow screens already smaller).
+        if max_x - min_x > MAX_EDGE {
+            let mid = (min_x + max_x) * 0.5;
+            min_x = (mid - MAX_EDGE * 0.5).max(0.0);
+            max_x = (min_x + MAX_EDGE).min(self.screen_w);
+        }
+        if max_y - min_y > MAX_EDGE {
+            let mid = (min_y + max_y) * 0.5;
+            min_y = (mid - MAX_EDGE * 0.5).max(0.0);
+            max_y = (min_y + MAX_EDGE).min(self.screen_h);
         }
         (min_x, min_y, max_x, max_y)
     }

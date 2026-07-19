@@ -1,4 +1,4 @@
-//! CJK-capable text raster for speech bubbles / particles (system font + fontdue).
+//! CJK-capable text raster for speech bubbles / particles (bundled subset + fontdue).
 
 use std::sync::OnceLock;
 
@@ -6,12 +6,19 @@ use fontdue::{Font, FontSettings};
 
 static FONT: OnceLock<Option<Font>> = OnceLock::new();
 
+/// Tiny Noto Sans SC subset (CJK + Latin, OFL) — avoids loading ~22MB system Unicode fonts.
+const BUNDLED: &[u8] = include_bytes!("../assets/fonts/pet-ui.ttf");
+
 fn load_font() -> Option<Font> {
+    if let Ok(font) = Font::from_bytes(BUNDLED, FontSettings::default()) {
+        return Some(font);
+    }
+    // Fallback for broken/missing asset in weird packaging layouts.
     const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
-        "/System/Library/Fonts/PingFang.ttc",
     ];
     for path in CANDIDATES {
         let Ok(bytes) = std::fs::read(path) else {

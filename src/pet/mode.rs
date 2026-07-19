@@ -68,6 +68,7 @@ impl Mode {
             Mode::Idle | Mode::Dizzy | Mode::Pet | Mode::Watching | Mode::BirdWatch => {
                 Duration::from_millis(66)
             }
+            // ~18 fps walk / ambient chase — full-buffer clear+blit; 25→18 cuts CPU.
             Mode::Walking
             | Mode::GoingHome
             | Mode::Clingy
@@ -75,12 +76,12 @@ impl Mode {
             | Mode::Feeding
             | Mode::ButterflyNose
             | Mode::Gifting
-            | Mode::Trick => Duration::from_millis(40),
+            | Mode::Trick => Duration::from_millis(55),
             Mode::Dragged
             | Mode::Chasing
             | Mode::Playing
             | Mode::Startled
-            | Mode::Photo => Duration::from_millis(33),
+            | Mode::Photo => Duration::from_millis(40),
         }
     }
 

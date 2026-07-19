@@ -79,9 +79,10 @@ struct App {
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     pet: Pet,
     sprites: SpriteCache,
-    /// Logical WIN×WIN canvas (straight ARGB).
+    /// Logical canvas (straight ARGB).
     pixels: Vec<u32>,
-    /// Physical buffer for Retina upscale / present.
+    /// Physical buffer for Retina upscale / present (non-macOS softbuffer path).
+    #[cfg(not(target_os = "macos"))]
     present_buf: Vec<u32>,
     last_tick: Instant,
     next_frame: Instant,
@@ -133,6 +134,7 @@ impl App {
             pet: Pet::new(screen_w, screen_h),
             sprites: SpriteCache::new(),
             pixels: vec![0; (WIN * WIN) as usize],
+            #[cfg(not(target_os = "macos"))]
             present_buf: Vec::new(),
             last_tick: now,
             next_frame: now,
@@ -170,13 +172,14 @@ impl App {
         let (lx, ly, lw, lh) = self.desired_view();
         let now = Instant::now();
 
-        // Grow immediately so props aren't clipped; shrink only past a threshold
-        // so ceil/round at the bounds edge doesn't resize every frame (flash).
-        let size_changed = force
-            || lw > self.view_w
-            || lh > self.view_h
-            || self.view_w.abs_diff(lw) >= VIEW_SIZE_THRESHOLD
-            || self.view_h.abs_diff(lh) >= VIEW_SIZE_THRESHOLD;
+        // Grow immediately so near props aren't clipped. Shrink as soon as the
+        // desired size drops by ≥ threshold (props left) — don't keep a huge
+        // canvas around after a flyer/laser pass. Tiny ±ceil jitter is ignored.
+        let grow = lw > self.view_w || lh > self.view_h;
+        let shrink_enough = (lw < self.view_w || lh < self.view_h)
+            && (self.view_w.abs_diff(lw) >= VIEW_SIZE_THRESHOLD
+                || self.view_h.abs_diff(lh) >= VIEW_SIZE_THRESHOLD);
+        let size_changed = force || grow || shrink_enough;
         let should_move = force
             || size_changed
             || match self.last_win_pos {
@@ -214,15 +217,11 @@ impl App {
             return;
         };
 
-        // Paint in logical view space (may be >WIN when props are far), then
-        // nearest-neighbor upscale to physical pixels for Retina.
-        // Use view×scale (not lagging inner_size) so a pending request_inner_size
-        // can't present one stretched/wrong frame while the OS catches up.
+        // Paint in logical view space (capped; see `Pet::visible_bounds`).
+        // Use committed view size (not lagging inner_size) so a pending
+        // request_inner_size can't present one wrong frame while the OS catches up.
         let lw = self.view_w.max(1);
         let lh = self.view_h.max(1);
-        let scale = window.scale_factor().max(0.01);
-        let pw = ((lw as f64) * scale).round().max(1.0) as u32;
-        let ph = ((lh as f64) * scale).round().max(1.0) as u32;
         let need = (lw as usize).saturating_mul(lh as usize);
         if self.pixels.len() != need {
             self.pixels.resize(need, 0);
@@ -242,23 +241,27 @@ impl App {
             &mut self.sprites,
         );
 
-        let phys = (pw as usize).saturating_mul(ph as usize);
-        if self.present_buf.len() != phys {
-            self.present_buf.resize(phys, 0);
-        }
-        if pw != lw || ph != lh {
-            blit_nn(&self.pixels, lw, lh, &mut self.present_buf, pw, ph);
-        } else {
-            self.present_buf.copy_from_slice(&self.pixels[..need]);
-        }
-
         #[cfg(target_os = "macos")]
         {
-            macos::present_argb(&window, &self.present_buf, pw, ph);
+            // Present logical pixels; CALayer `contentsScale` upscales on Retina.
+            // Avoids a full physical present_buf (+premuls) every frame.
+            macos::present_argb(&window, &self.pixels, lw, lh);
         }
 
         #[cfg(not(target_os = "macos"))]
         {
+            let scale = window.scale_factor().max(0.01);
+            let pw = ((lw as f64) * scale).round().max(1.0) as u32;
+            let ph = ((lh as f64) * scale).round().max(1.0) as u32;
+            let phys = (pw as usize).saturating_mul(ph as usize);
+            if self.present_buf.len() != phys {
+                self.present_buf.resize(phys, 0);
+            }
+            if pw != lw || ph != lh {
+                blit_nn(&self.pixels, lw, lh, &mut self.present_buf, pw, ph);
+            } else {
+                self.present_buf.copy_from_slice(&self.pixels[..need]);
+            }
             let Some(surface) = &mut self.surface else {
                 return;
             };
@@ -1039,6 +1042,7 @@ impl App {
 }
 
 /// Nearest-neighbor blit from a logical canvas to a physical softbuffer.
+#[cfg(not(target_os = "macos"))]
 fn blit_nn(src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32) {
     let need = (dw * dh) as usize;
     if dst.len() < need || sw == 0 || sh == 0 {

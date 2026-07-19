@@ -1,9 +1,9 @@
 //! macOS helpers: accessory app, transparent window, click-through, cursor poll,
 //! and CALayer present with real alpha (softbuffer 0.4 ignores alpha on macOS).
 
+use std::cell::RefCell;
 use std::ffi::c_void;
-use std::mem::size_of;
-use std::ptr::{self, slice_from_raw_parts_mut, NonNull};
+use std::ptr::{self, NonNull};
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
@@ -15,9 +15,17 @@ use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo, CGImageComponentInfo, CGImagePixelFormatInfo,
 };
-use objc2_quartz_core::{CATransaction};
+use objc2_quartz_core::CATransaction;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
+
+thread_local! {
+    /// Ping-pong premul buffers — no per-frame `Vec` alloc. Layer holds the
+    /// previously presented buffer until the next `setContents`, so we never
+    /// write the slot that may still be referenced.
+    static PREMUL: RefCell<[Vec<u32>; 2]> = RefCell::new([Vec::new(), Vec::new()]);
+    static PREMUL_IDX: RefCell<usize> = RefCell::new(0);
+}
 
 pub fn set_accessory_policy() {
     let mtm = MainThreadMarker::new().expect("macOS UI on main thread");
@@ -79,6 +87,9 @@ pub fn set_window_alpha(window: &Window, alpha: f64) {
 
 /// Present straight ARGB `0xAARRGGBB` pixels with real transparency via CALayer.
 ///
+/// Prefer **logical** pixel buffers and let `contentsScale` upscale on Retina —
+/// that cuts present memory ~4× vs nearest-neighbor into a physical buffer.
+///
 /// softbuffer 0.4's macOS backend uses `CGImageAlphaInfo::NoneSkipFirst`, which
 /// turns clear pixels into an opaque black square — so we present ourselves.
 pub fn present_argb(window: &Window, pixels: &[u32], width: u32, height: u32) {
@@ -98,14 +109,33 @@ pub fn present_argb(window: &Window, pixels: &[u32], width: u32, height: u32) {
         return;
     };
     layer.setOpaque(false);
+    // Logical buffer + scale → Core Animation upscales; sharp enough for the pet.
     layer.setContentsScale(window.scale_factor());
 
-    // Premultiply; buffer ownership transfers to CGDataProvider (freed on image drop).
-    let owned: Vec<u32> = pixels[..need].iter().copied().map(premultiply_argb).collect();
-
-    let Ok(image) = cgimage_from_premul_owned(owned, width as usize, height as usize) else {
+    let idx = PREMUL_IDX.with(|i| *i.borrow());
+    let Ok(image) = PREMUL.with(|cell| {
+        let mut bufs = cell.borrow_mut();
+        let buf = &mut bufs[idx];
+        if buf.capacity() < need {
+            // Drop any live layer contents that might point into this slot before
+            // reallocating (pointer would dangle).
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            unsafe { layer.setContents(Option::<&objc2::runtime::AnyObject>::None) };
+            CATransaction::commit();
+            buf.clear();
+            buf.reserve_exact(need);
+        }
+        buf.resize(need, 0);
+        for (dst, &src) in buf.iter_mut().zip(pixels[..need].iter()) {
+            *dst = premultiply_argb(src);
+        }
+        cgimage_from_premul_borrowed(buf.as_ptr(), need, width as usize, height as usize)
+    }) else {
         return;
     };
+
+    PREMUL_IDX.with(|i| *i.borrow_mut() = 1 - idx);
 
     CATransaction::begin();
     CATransaction::setDisableActions(true);
@@ -131,32 +161,28 @@ fn premultiply_argb(p: u32) -> u32 {
     (a << 24) | (r << 16) | (g << 8) | b
 }
 
-fn cgimage_from_premul_owned(
-    pixels: Vec<u32>,
+/// Build a CGImage that **borrows** `pixels` (no copy). Caller must keep the
+/// buffer alive and unchanged until the image is no longer layer contents.
+fn cgimage_from_premul_borrowed(
+    pixels: *const u32,
+    len: usize,
     width: usize,
     height: usize,
 ) -> Result<CFRetained<CGImage>, ()> {
-    unsafe extern "C-unwind" fn release(_info: *mut c_void, data: NonNull<c_void>, size: usize) {
-        let data = data.cast::<u32>();
-        let slice = slice_from_raw_parts_mut(data.as_ptr(), size / size_of::<u32>());
-        // SAFETY: same allocation we passed to Box::into_raw below.
-        drop(unsafe { Box::from_raw(slice) });
+    unsafe extern "C-unwind" fn release_noop(
+        _info: *mut c_void,
+        _data: NonNull<c_void>,
+        _size: usize,
+    ) {
+        // Buffer owned by the ping-pong slot; nothing to free here.
     }
 
-    let buffer = pixels.into_boxed_slice();
-    let len = buffer.len() * size_of::<u32>();
-    let raw: *mut [u32] = Box::into_raw(buffer);
-    let data_ptr = raw.cast::<c_void>();
+    let byte_len = len * std::mem::size_of::<u32>();
+    let data_ptr = pixels as *mut c_void;
 
     let data_provider = unsafe {
-        match CGDataProvider::with_data(ptr::null_mut(), data_ptr, len, Some(release)) {
-            Some(dp) => dp,
-            None => {
-                // Provider never took ownership — reclaim the box ourselves.
-                drop(Box::from_raw(raw));
-                return Err(());
-            }
-        }
+        CGDataProvider::with_data(ptr::null_mut(), data_ptr, byte_len, Some(release_noop))
+            .ok_or(())?
     };
 
     let bitmap_info = CGBitmapInfo(
