@@ -106,6 +106,8 @@ struct App {
     view_h: u32,
     last_win_move: Instant,
     last_passthrough: Instant,
+    /// One-shot: spawn bird flyby + laser after first frame (perf stress).
+    stress_props: bool,
 }
 
 /// How far (logical px) the pet may drift inside the window before we move the OS window.
@@ -154,6 +156,7 @@ impl App {
             view_h: WIN,
             last_win_move: now,
             last_passthrough: now,
+            stress_props: false,
         }
     }
 
@@ -740,6 +743,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         self.window = Some(window);
+        if self.stress_props {
+            self.pet.spawn_bird_flyby();
+            self.pet.spawn_toy(ToyKind::Laser);
+            self.stress_props = false;
+            eprintln!("cat-desk-pet: stress props (bird + laser)");
+        }
         self.sync_window_pos(true);
         self.redraw();
         // Accessory (no Dock) — force above other windows so the pet is findable.
@@ -937,6 +946,15 @@ impl App {
         };
         match cmd {
             MenuCommand::Quit => {
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(w) = &self.window {
+                        macos::clear_present(w);
+                    }
+                    if let Some(w) = &self.flash_window {
+                        macos::clear_present(w);
+                    }
+                }
                 event_loop.exit();
             }
             MenuCommand::Toggle => {
@@ -1099,6 +1117,10 @@ fn parse_force_scene() -> Option<ForceScene> {
     None
 }
 
+fn parse_stress_props() -> bool {
+    std::env::args().any(|a| a == "--stress-props")
+}
+
 fn parse_force_scene_value(v: &str) -> Option<ForceScene> {
     match v.to_ascii_lowercase().as_str() {
         "sleeping" | "sleep" => Some(ForceScene::Sleeping),
@@ -1130,6 +1152,7 @@ fn main() {
     }));
 
     let force = parse_force_scene();
+    let stress_props = parse_stress_props();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     let proxy = event_loop.create_proxy();
     MenuEvent::set_event_handler(Some(move |event| {
@@ -1139,6 +1162,7 @@ fn main() {
     // Rough primary-screen logical size fallback; refined once window exists.
     let (sw, sh) = (1440.0, 900.0);
     let mut app = App::new(sw, sh);
+    app.stress_props = stress_props;
     if let Some(scene) = force {
         app.pet.force_scene = Some(scene);
         app.pet.mode = match scene {

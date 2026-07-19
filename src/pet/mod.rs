@@ -582,15 +582,28 @@ impl Pet {
             include(self.home_x, self.home_y, 70.0);
         }
 
-        // Cap to a pet-centered MAX_EDGE box so one far prop can't force a huge canvas.
-        if max_x - min_x > MAX_EDGE {
-            min_x = cx - MAX_EDGE * 0.5;
-            max_x = min_x + MAX_EDGE;
-        }
-        if max_y - min_y > MAX_EDGE {
-            min_y = cy - MAX_EDGE * 0.5;
-            max_y = min_y + MAX_EDGE;
-        }
+        // Cap oversized unions around the *union* center (not pet-only) so a
+        // near prop on one side isn't cropped while empty space remains on the other.
+        let clamp_edge = |min_v: f64, max_v: f64, limit: f64| -> (f64, f64) {
+            let span = max_v - min_v;
+            if span <= MAX_EDGE {
+                return (min_v, max_v);
+            }
+            let mid = (min_v + max_v) * 0.5;
+            let half = MAX_EDGE * 0.5;
+            let mut a = mid - half;
+            let mut b = mid + half;
+            if a < 0.0 {
+                a = 0.0;
+                b = MAX_EDGE.min(limit);
+            } else if b > limit {
+                b = limit;
+                a = (b - MAX_EDGE).max(0.0);
+            }
+            (a, b)
+        };
+        (min_x, max_x) = clamp_edge(min_x, max_x, self.screen_w);
+        (min_y, max_y) = clamp_edge(min_y, max_y, self.screen_h);
 
         // Clamp to screen so the OS window never exceeds the desktop.
         min_x = min_x.max(0.0);
@@ -605,17 +618,9 @@ impl Pet {
             max_y = (min_y + BASE).min(self.screen_h);
             min_y = (max_y - BASE).max(0.0);
         }
-        // Re-apply edge cap after screen clamp (narrow screens already smaller).
-        if max_x - min_x > MAX_EDGE {
-            let mid = (min_x + max_x) * 0.5;
-            min_x = (mid - MAX_EDGE * 0.5).max(0.0);
-            max_x = (min_x + MAX_EDGE).min(self.screen_w);
-        }
-        if max_y - min_y > MAX_EDGE {
-            let mid = (min_y + max_y) * 0.5;
-            min_y = (mid - MAX_EDGE * 0.5).max(0.0);
-            max_y = (min_y + MAX_EDGE).min(self.screen_h);
-        }
+        // Re-apply edge cap after BASE expand (narrow screens already smaller).
+        (min_x, max_x) = clamp_edge(min_x, max_x, self.screen_w);
+        (min_y, max_y) = clamp_edge(min_y, max_y, self.screen_h);
         (min_x, min_y, max_x, max_y)
     }
 

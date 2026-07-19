@@ -3,7 +3,8 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::ptr::{self, NonNull};
+use std::mem::size_of;
+use std::ptr::{self, slice_from_raw_parts_mut, NonNull};
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
@@ -20,11 +21,10 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 thread_local! {
-    /// Ping-pong premul buffers — no per-frame `Vec` alloc. Layer holds the
-    /// previously presented buffer until the next `setContents`, so we never
-    /// write the slot that may still be referenced.
-    static PREMUL: RefCell<[Vec<u32>; 2]> = RefCell::new([Vec::new(), Vec::new()]);
-    static PREMUL_IDX: RefCell<usize> = RefCell::new(0);
+    /// Recycled premul buffers. Ownership transfers into CGImage; the release
+    /// callback returns capacity here so we never free while the layer still
+    /// references the pixels (and never leave dangling TLS pointers on exit).
+    static PREMUL_FREE: RefCell<Vec<Vec<u32>>> = RefCell::new(Vec::new());
 }
 
 pub fn set_accessory_policy() {
@@ -63,6 +63,21 @@ pub fn set_ignore_mouse(window: &Window, ignore: bool) {
         return;
     };
     ns_window.setIgnoresMouseEvents(ignore);
+}
+
+/// Drop CALayer image contents so any borrowed/owned present buffer can release
+/// before process teardown (avoids UAF if a provider outlives TLS recycle).
+pub fn clear_present(window: &Window) {
+    let Some(ns_view) = ns_view(window) else {
+        return;
+    };
+    let Some(layer) = ns_view.layer() else {
+        return;
+    };
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    unsafe { layer.setContents(Option::<&objc2::runtime::AnyObject>::None) };
+    CATransaction::commit();
 }
 
 /// Full-screen photo flash overlay: white panel, click-through, alpha-driven.
@@ -112,36 +127,48 @@ pub fn present_argb(window: &Window, pixels: &[u32], width: u32, height: u32) {
     // Logical buffer + scale → Core Animation upscales; sharp enough for the pet.
     layer.setContentsScale(window.scale_factor());
 
-    let idx = PREMUL_IDX.with(|i| *i.borrow());
-    let Ok(image) = PREMUL.with(|cell| {
-        let mut bufs = cell.borrow_mut();
-        let buf = &mut bufs[idx];
-        if buf.capacity() < need {
-            // Drop any live layer contents that might point into this slot before
-            // reallocating (pointer would dangle).
-            CATransaction::begin();
-            CATransaction::setDisableActions(true);
-            unsafe { layer.setContents(Option::<&objc2::runtime::AnyObject>::None) };
-            CATransaction::commit();
-            buf.clear();
-            buf.reserve_exact(need);
-        }
-        buf.resize(need, 0);
-        for (dst, &src) in buf.iter_mut().zip(pixels[..need].iter()) {
-            *dst = premultiply_argb(src);
-        }
-        cgimage_from_premul_borrowed(buf.as_ptr(), need, width as usize, height as usize)
-    }) else {
+    let mut buf = take_premul_buf(need);
+    for (dst, &src) in buf.iter_mut().zip(pixels[..need].iter()) {
+        *dst = premultiply_argb(src);
+    }
+
+    let Ok(image) = cgimage_from_premul_owned(buf, width as usize, height as usize) else {
         return;
     };
-
-    PREMUL_IDX.with(|i| *i.borrow_mut() = 1 - idx);
 
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     // SAFETY: CGImage is a valid contents class for CALayer.
     unsafe { layer.setContents(Some(image.as_ref())) };
     CATransaction::commit();
+}
+
+fn take_premul_buf(need: usize) -> Vec<u32> {
+    PREMUL_FREE.with(|cell| {
+        let mut free = cell.borrow_mut();
+        let mut buf = free
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.capacity() >= need)
+            .max_by_key(|(_, v)| v.capacity())
+            .map(|(i, _)| i)
+            .map(|i| free.swap_remove(i))
+            .unwrap_or_default();
+        buf.clear();
+        buf.resize(need, 0);
+        buf
+    })
+}
+
+fn recycle_premul_buf(buf: Vec<u32>) {
+    PREMUL_FREE.with(|cell| {
+        let mut free = cell.borrow_mut();
+        // Keep a couple of recycled slots; drop extras to bound idle RSS.
+        if free.len() >= 2 {
+            return;
+        }
+        free.push(buf);
+    });
 }
 
 fn premultiply_argb(p: u32) -> u32 {
@@ -161,28 +188,32 @@ fn premultiply_argb(p: u32) -> u32 {
     (a << 24) | (r << 16) | (g << 8) | b
 }
 
-/// Build a CGImage that **borrows** `pixels` (no copy). Caller must keep the
-/// buffer alive and unchanged until the image is no longer layer contents.
-fn cgimage_from_premul_borrowed(
-    pixels: *const u32,
-    len: usize,
+fn cgimage_from_premul_owned(
+    pixels: Vec<u32>,
     width: usize,
     height: usize,
 ) -> Result<CFRetained<CGImage>, ()> {
-    unsafe extern "C-unwind" fn release_noop(
-        _info: *mut c_void,
-        _data: NonNull<c_void>,
-        _size: usize,
-    ) {
-        // Buffer owned by the ping-pong slot; nothing to free here.
+    unsafe extern "C-unwind" fn release(_info: *mut c_void, data: NonNull<c_void>, size: usize) {
+        let data = data.cast::<u32>();
+        let slice = slice_from_raw_parts_mut(data.as_ptr(), size / size_of::<u32>());
+        // SAFETY: same allocation we passed to Box::into_raw below.
+        let buf = unsafe { Box::from_raw(slice) }.into_vec();
+        recycle_premul_buf(buf);
     }
 
-    let byte_len = len * std::mem::size_of::<u32>();
-    let data_ptr = pixels as *mut c_void;
+    let buffer = pixels.into_boxed_slice();
+    let len = buffer.len() * size_of::<u32>();
+    let raw: *mut [u32] = Box::into_raw(buffer);
+    let data_ptr = raw.cast::<c_void>();
 
     let data_provider = unsafe {
-        CGDataProvider::with_data(ptr::null_mut(), data_ptr, byte_len, Some(release_noop))
-            .ok_or(())?
+        match CGDataProvider::with_data(ptr::null_mut(), data_ptr, len, Some(release)) {
+            Some(dp) => dp,
+            None => {
+                drop(Box::from_raw(raw));
+                return Err(());
+            }
+        }
     };
 
     let bitmap_info = CGBitmapInfo(

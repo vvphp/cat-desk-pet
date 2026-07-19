@@ -30,10 +30,23 @@ cargo run --release -- --mode sleeping   # sleeping | idle | walking
 ### 内存尖峰（issue #3）
 
 - 可绘制窗边长硬顶 ~480；远距飞鸟/激光拖尾裁切，不再把主窗拉到接近全屏
-- macOS `present_argb`：逻辑像素 + `contentsScale`，premull 双缓冲复用（无每帧 `Vec::collect`）
-- 气泡字体改为打包 Noto Sans SC 子集 `assets/fonts/pet-ui.ttf`（~42KB，OFL），不再整文件加载 Arial Unicode（~22MB）
+- macOS `present_argb`：逻辑像素 + `contentsScale`，premull 缓冲回收复用（CGImage 持有所有权）
+- 气泡字体改为打包 Noto 子集 `assets/fonts/pet-ui.ttf`（~26KB，OFL，含 ♡❤♪ω∇），不再整文件加载 Arial Unicode（~22MB）
 
-### 实测 — 2026-07-18 / Apple M5（v2）
+### 实测 — 2026-07-19 / issue #3（release）
+
+warm ≥5s；CPU/RSS：`ps` 1Hz ×15s；尖峰：`vmmap -summary` Physical footprint (peak)。
+
+| 场景 | avg %CPU | RSS | footprint / peak |
+|------|---------:|----:|-----------------:|
+| sleeping | **0.91** | 74.5 MB | 14.7 / **14.9 MB** |
+| idle | **1.43** | 73.0 MB | 14.8 / **15.1 MB** |
+| walking | **2.81** | 73.3 MB | 15.5 / **15.7 MB** |
+| walking + `--stress-props`（鸟+激光） | — | ~75 MB | 17.3 / **17.9 MB** |
+
+历史基线（修前 v1.0.1 压力）：Physical footprint (peak) **~1.1 GB**。
+
+### 实测 — 2026-07-18 / Apple M5（v2，修前对照）
 
 warm 5s + 采样 30s。
 

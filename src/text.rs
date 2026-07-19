@@ -2,11 +2,13 @@
 
 use std::sync::OnceLock;
 
-use fontdue::{Font, FontSettings};
+use fontdue::{Font, FontSettings, Metrics};
 
 static FONT: OnceLock<Option<Font>> = OnceLock::new();
+/// System face for rare symbols / emoji the bundled subset omits (not redistributed).
+static FALLBACK: OnceLock<Option<Font>> = OnceLock::new();
 
-/// Tiny Noto Sans SC subset (CJK + Latin, OFL) — avoids loading ~22MB system Unicode fonts.
+/// Tiny Noto Sans SC + symbols subset (CJK + Latin + ♡❤♪ω∇, OFL).
 const BUNDLED: &[u8] = include_bytes!("../assets/fonts/pet-ui.ttf");
 
 fn load_font() -> Option<Font> {
@@ -14,11 +16,28 @@ fn load_font() -> Option<Font> {
         return Some(font);
     }
     // Fallback for broken/missing asset in weird packaging layouts.
+    // Prefer CJK-capable faces first — never Arial.ttf (Latin-only).
     const CANDIDATES: &[&str] = &[
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ];
+    for path in CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        if let Ok(font) = Font::from_bytes(bytes.as_slice(), FontSettings::default()) {
+            return Some(font);
+        }
+    }
+    None
+}
+
+fn load_fallback() -> Option<Font> {
+    const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/Apple Symbols.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/Library/Fonts/Arial Unicode.ttf",
     ];
     for path in CANDIDATES {
         let Ok(bytes) = std::fs::read(path) else {
@@ -35,15 +54,60 @@ fn font() -> Option<&'static Font> {
     FONT.get_or_init(load_font).as_ref()
 }
 
+fn fallback_font() -> Option<&'static Font> {
+    FALLBACK.get_or_init(load_fallback).as_ref()
+}
+
+fn glyph_ok(ch: char, metrics: &Metrics, bitmap: &[u8]) -> bool {
+    if ch.is_whitespace() {
+        return true;
+    }
+    metrics.advance_width > 0.0 && metrics.width > 0 && metrics.height > 0 && !bitmap.is_empty()
+}
+
+fn metrics_for(ch: char, px: f32) -> Metrics {
+    let Some(primary) = font() else {
+        return Metrics::default();
+    };
+    let m = primary.metrics(ch, px);
+    if ch.is_whitespace() || m.advance_width > 0.5 {
+        return m;
+    }
+    if let Some(fb) = fallback_font() {
+        let fm = fb.metrics(ch, px);
+        if fm.advance_width > 0.5 {
+            return fm;
+        }
+    }
+    m
+}
+
+fn rasterize_for(ch: char, px: f32) -> (Metrics, Vec<u8>) {
+    let Some(primary) = font() else {
+        return (Metrics::default(), Vec::new());
+    };
+    let (m, b) = primary.rasterize(ch, px);
+    if glyph_ok(ch, &m, &b) {
+        return (m, b);
+    }
+    if let Some(fb) = fallback_font() {
+        let (fm, fbmap) = fb.rasterize(ch, px);
+        if glyph_ok(ch, &fm, &fbmap) {
+            return (fm, fbmap);
+        }
+    }
+    (m, b)
+}
+
 /// Measure text width/height at `px` size.
 pub fn measure(text: &str, px: f32) -> (f32, f32) {
-    let Some(font) = font() else {
+    if font().is_none() {
         return ((text.chars().count() as f32) * px * 0.6, px);
-    };
+    }
     let mut w = 0.0f32;
     let mut h = px;
     for ch in text.chars() {
-        let m = font.metrics(ch, px);
+        let m = metrics_for(ch, px);
         w += m.advance_width;
         h = h.max(m.height as f32 + (m.ymin as f32).abs());
     }
@@ -64,7 +128,7 @@ pub fn blit_text(
     b: u8,
     a_mul: f32,
 ) {
-    let Some(font) = font() else {
+    if font().is_none() {
         let mut cx = x;
         for _ in text.chars() {
             fill_block(
@@ -83,12 +147,12 @@ pub fn blit_text(
             cx += px as f64 * 0.55;
         }
         return;
-    };
+    }
 
     let mut pen_x = x as f32;
     let baseline = y as f32 + px * 0.85;
     for ch in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, px);
+        let (metrics, bitmap) = rasterize_for(ch, px);
         let gx = pen_x + metrics.xmin as f32;
         let gy = baseline - metrics.height as f32 - metrics.ymin as f32;
         for row in 0..metrics.height {
