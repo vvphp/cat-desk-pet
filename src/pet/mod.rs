@@ -522,19 +522,31 @@ impl Pet {
         self.clamp_pos();
     }
 
-    /// Desktop-logical axis-aligned bounds that must stay visible (pet + world props).
-    /// Used to grow the small window so toys / flyers aren't clipped.
+    /// Desktop-logical axis-aligned bounds that must stay visible (pet + nearby props).
+    ///
+    /// Far flyers / laser trails are clipped instead of growing the OS window toward
+    /// full-monitor size (that path allocated multi‑hundred MB Retina present buffers).
     pub fn visible_bounds(&self) -> (f64, f64, f64, f64) {
         // Match the idle pet window (~180²) footprint around the pet.
         const BASE: f64 = 180.0;
+        /// Hard cap on either edge — keeps present buffers bounded on Retina.
+        const MAX_EDGE: f64 = 480.0;
+        /// Only expand for props within this distance of the pet center (+ pad).
+        const NEAR: f64 = 200.0;
+
         let half = BASE * 0.5;
         let mut min_x = self.x - half;
         let mut max_x = self.x + half;
         // Extra headroom for speech bubbles above the pet.
         let mut min_y = self.y - half - 56.0;
         let mut max_y = self.y + half;
+        let cx = self.x;
+        let cy = self.y;
 
         let mut include = |x: f64, y: f64, pad: f64| {
+            if (x - cx).abs() > NEAR + pad || (y - cy).abs() > NEAR + pad {
+                return;
+            }
             min_x = min_x.min(x - pad);
             max_x = max_x.max(x + pad);
             min_y = min_y.min(y - pad);
@@ -570,6 +582,29 @@ impl Pet {
             include(self.home_x, self.home_y, 70.0);
         }
 
+        // Cap oversized unions around the *union* center (not pet-only) so a
+        // near prop on one side isn't cropped while empty space remains on the other.
+        let clamp_edge = |min_v: f64, max_v: f64, limit: f64| -> (f64, f64) {
+            let span = max_v - min_v;
+            if span <= MAX_EDGE {
+                return (min_v, max_v);
+            }
+            let mid = (min_v + max_v) * 0.5;
+            let half = MAX_EDGE * 0.5;
+            let mut a = mid - half;
+            let mut b = mid + half;
+            if a < 0.0 {
+                a = 0.0;
+                b = MAX_EDGE.min(limit);
+            } else if b > limit {
+                b = limit;
+                a = (b - MAX_EDGE).max(0.0);
+            }
+            (a, b)
+        };
+        (min_x, max_x) = clamp_edge(min_x, max_x, self.screen_w);
+        (min_y, max_y) = clamp_edge(min_y, max_y, self.screen_h);
+
         // Clamp to screen so the OS window never exceeds the desktop.
         min_x = min_x.max(0.0);
         min_y = min_y.max(0.0);
@@ -583,6 +618,9 @@ impl Pet {
             max_y = (min_y + BASE).min(self.screen_h);
             min_y = (max_y - BASE).max(0.0);
         }
+        // Re-apply edge cap after BASE expand (narrow screens already smaller).
+        (min_x, max_x) = clamp_edge(min_x, max_x, self.screen_w);
+        (min_y, max_y) = clamp_edge(min_y, max_y, self.screen_h);
         (min_x, min_y, max_x, max_y)
     }
 

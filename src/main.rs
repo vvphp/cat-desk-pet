@@ -79,7 +79,7 @@ struct App {
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     pet: Pet,
     sprites: SpriteCache,
-    /// Logical WIN×WIN canvas (straight ARGB).
+    /// Logical canvas (straight ARGB).
     pixels: Vec<u32>,
     /// Physical buffer for Retina upscale / present.
     present_buf: Vec<u32>,
@@ -105,6 +105,8 @@ struct App {
     view_h: u32,
     last_win_move: Instant,
     last_passthrough: Instant,
+    /// One-shot: spawn bird flyby + laser after first frame (perf stress).
+    stress_props: bool,
 }
 
 /// How far (logical px) the pet may drift inside the window before we move the OS window.
@@ -152,6 +154,7 @@ impl App {
             view_h: WIN,
             last_win_move: now,
             last_passthrough: now,
+            stress_props: false,
         }
     }
 
@@ -170,13 +173,14 @@ impl App {
         let (lx, ly, lw, lh) = self.desired_view();
         let now = Instant::now();
 
-        // Grow immediately so props aren't clipped; shrink only past a threshold
-        // so ceil/round at the bounds edge doesn't resize every frame (flash).
-        let size_changed = force
-            || lw > self.view_w
-            || lh > self.view_h
-            || self.view_w.abs_diff(lw) >= VIEW_SIZE_THRESHOLD
-            || self.view_h.abs_diff(lh) >= VIEW_SIZE_THRESHOLD;
+        // Grow immediately so near props aren't clipped. Shrink as soon as the
+        // desired size drops by ≥ threshold (props left) — don't keep a huge
+        // canvas around after a flyer/laser pass. Tiny ±ceil jitter is ignored.
+        let grow = lw > self.view_w || lh > self.view_h;
+        let shrink_enough = (lw < self.view_w || lh < self.view_h)
+            && (self.view_w.abs_diff(lw) >= VIEW_SIZE_THRESHOLD
+                || self.view_h.abs_diff(lh) >= VIEW_SIZE_THRESHOLD);
+        let size_changed = force || grow || shrink_enough;
         let should_move = force
             || size_changed
             || match self.last_win_pos {
@@ -214,10 +218,11 @@ impl App {
             return;
         };
 
-        // Paint in logical view space (may be >WIN when props are far), then
-        // nearest-neighbor upscale to physical pixels for Retina.
-        // Use view×scale (not lagging inner_size) so a pending request_inner_size
-        // can't present one stretched/wrong frame while the OS catches up.
+        // Paint in logical view space (capped; see `Pet::visible_bounds`), then
+        // nearest-neighbor upscale to physical pixels for Retina. Logical-only
+        // present + contentsScale made bubble/text edges severely jagged.
+        // Use committed view size (not lagging inner_size) so a pending
+        // request_inner_size can't present one wrong frame while the OS catches up.
         let lw = self.view_w.max(1);
         let lh = self.view_h.max(1);
         let scale = window.scale_factor().max(0.01);
@@ -737,6 +742,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         self.window = Some(window);
+        if self.stress_props {
+            self.pet.spawn_bird_flyby();
+            self.pet.spawn_toy(ToyKind::Laser);
+            self.stress_props = false;
+            eprintln!("cat-desk-pet: stress props (bird + laser)");
+        }
         self.sync_window_pos(true);
         self.redraw();
         // Accessory (no Dock) — force above other windows so the pet is findable.
@@ -934,6 +945,15 @@ impl App {
         };
         match cmd {
             MenuCommand::Quit => {
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(w) = &self.window {
+                        macos::clear_present(w);
+                    }
+                    if let Some(w) = &self.flash_window {
+                        macos::clear_present(w);
+                    }
+                }
                 event_loop.exit();
             }
             MenuCommand::Toggle => {
@@ -1038,7 +1058,7 @@ impl App {
     }
 }
 
-/// Nearest-neighbor blit from a logical canvas to a physical softbuffer.
+/// Nearest-neighbor blit from a logical canvas to a physical present buffer.
 fn blit_nn(src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32) {
     let need = (dw * dh) as usize;
     if dst.len() < need || sw == 0 || sh == 0 {
@@ -1095,6 +1115,10 @@ fn parse_force_scene() -> Option<ForceScene> {
     None
 }
 
+fn parse_stress_props() -> bool {
+    std::env::args().any(|a| a == "--stress-props")
+}
+
 fn parse_force_scene_value(v: &str) -> Option<ForceScene> {
     match v.to_ascii_lowercase().as_str() {
         "sleeping" | "sleep" => Some(ForceScene::Sleeping),
@@ -1126,6 +1150,7 @@ fn main() {
     }));
 
     let force = parse_force_scene();
+    let stress_props = parse_stress_props();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     let proxy = event_loop.create_proxy();
     MenuEvent::set_event_handler(Some(move |event| {
@@ -1135,6 +1160,7 @@ fn main() {
     // Rough primary-screen logical size fallback; refined once window exists.
     let (sw, sh) = (1440.0, 900.0);
     let mut app = App::new(sw, sh);
+    app.stress_props = stress_props;
     if let Some(scene) = force {
         app.pet.force_scene = Some(scene);
         app.pet.mode = match scene {

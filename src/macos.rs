@@ -1,6 +1,7 @@
 //! macOS helpers: accessory app, transparent window, click-through, cursor poll,
 //! and CALayer present with real alpha (softbuffer 0.4 ignores alpha on macOS).
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{self, slice_from_raw_parts_mut, NonNull};
@@ -15,9 +16,16 @@ use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo, CGImageComponentInfo, CGImagePixelFormatInfo,
 };
-use objc2_quartz_core::{CATransaction};
+use objc2_quartz_core::CATransaction;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
+
+thread_local! {
+    /// Recycled premul buffers. Ownership transfers into CGImage; the release
+    /// callback returns capacity here so we never free while the layer still
+    /// references the pixels (and never leave dangling TLS pointers on exit).
+    static PREMUL_FREE: RefCell<Vec<Vec<u32>>> = RefCell::new(Vec::new());
+}
 
 pub fn set_accessory_policy() {
     let mtm = MainThreadMarker::new().expect("macOS UI on main thread");
@@ -57,6 +65,21 @@ pub fn set_ignore_mouse(window: &Window, ignore: bool) {
     ns_window.setIgnoresMouseEvents(ignore);
 }
 
+/// Drop CALayer image contents so any borrowed/owned present buffer can release
+/// before process teardown (avoids UAF if a provider outlives TLS recycle).
+pub fn clear_present(window: &Window) {
+    let Some(ns_view) = ns_view(window) else {
+        return;
+    };
+    let Some(layer) = ns_view.layer() else {
+        return;
+    };
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    unsafe { layer.setContents(Option::<&objc2::runtime::AnyObject>::None) };
+    CATransaction::commit();
+}
+
 /// Full-screen photo flash overlay: white panel, click-through, alpha-driven.
 pub fn configure_flash_overlay(window: &Window) {
     let Some(ns_window) = ns_window(window) else {
@@ -79,6 +102,10 @@ pub fn set_window_alpha(window: &Window, alpha: f64) {
 
 /// Present straight ARGB `0xAARRGGBB` pixels with real transparency via CALayer.
 ///
+/// Callers should pass a **physical** (Retina) buffer sized `logical × scale_factor`
+/// so edges stay sharp. `contentsScale` tells Core Animation the buffer is already
+/// in device pixels. View size is capped (`MAX_EDGE`), so peak RSS stays bounded.
+///
 /// softbuffer 0.4's macOS backend uses `CGImageAlphaInfo::NoneSkipFirst`, which
 /// turns clear pixels into an opaque black square — so we present ourselves.
 pub fn present_argb(window: &Window, pixels: &[u32], width: u32, height: u32) {
@@ -98,12 +125,15 @@ pub fn present_argb(window: &Window, pixels: &[u32], width: u32, height: u32) {
         return;
     };
     layer.setOpaque(false);
+    // Physical buffer + matching scale → 1:1 device pixels (no CA upscale blur).
     layer.setContentsScale(window.scale_factor());
 
-    // Premultiply; buffer ownership transfers to CGDataProvider (freed on image drop).
-    let owned: Vec<u32> = pixels[..need].iter().copied().map(premultiply_argb).collect();
+    let mut buf = take_premul_buf(need);
+    for (dst, &src) in buf.iter_mut().zip(pixels[..need].iter()) {
+        *dst = premultiply_argb(src);
+    }
 
-    let Ok(image) = cgimage_from_premul_owned(owned, width as usize, height as usize) else {
+    let Ok(image) = cgimage_from_premul_owned(buf, width as usize, height as usize) else {
         return;
     };
 
@@ -112,6 +142,34 @@ pub fn present_argb(window: &Window, pixels: &[u32], width: u32, height: u32) {
     // SAFETY: CGImage is a valid contents class for CALayer.
     unsafe { layer.setContents(Some(image.as_ref())) };
     CATransaction::commit();
+}
+
+fn take_premul_buf(need: usize) -> Vec<u32> {
+    PREMUL_FREE.with(|cell| {
+        let mut free = cell.borrow_mut();
+        let mut buf = free
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.capacity() >= need)
+            .max_by_key(|(_, v)| v.capacity())
+            .map(|(i, _)| i)
+            .map(|i| free.swap_remove(i))
+            .unwrap_or_default();
+        buf.clear();
+        buf.resize(need, 0);
+        buf
+    })
+}
+
+fn recycle_premul_buf(buf: Vec<u32>) {
+    PREMUL_FREE.with(|cell| {
+        let mut free = cell.borrow_mut();
+        // Keep a couple of recycled slots; drop extras to bound idle RSS.
+        if free.len() >= 2 {
+            return;
+        }
+        free.push(buf);
+    });
 }
 
 fn premultiply_argb(p: u32) -> u32 {
@@ -140,7 +198,8 @@ fn cgimage_from_premul_owned(
         let data = data.cast::<u32>();
         let slice = slice_from_raw_parts_mut(data.as_ptr(), size / size_of::<u32>());
         // SAFETY: same allocation we passed to Box::into_raw below.
-        drop(unsafe { Box::from_raw(slice) });
+        let buf = unsafe { Box::from_raw(slice) }.into_vec();
+        recycle_premul_buf(buf);
     }
 
     let buffer = pixels.into_boxed_slice();
@@ -152,7 +211,6 @@ fn cgimage_from_premul_owned(
         match CGDataProvider::with_data(ptr::null_mut(), data_ptr, len, Some(release)) {
             Some(dp) => dp,
             None => {
-                // Provider never took ownership — reclaim the box ourselves.
                 drop(Box::from_raw(raw));
                 return Err(());
             }
