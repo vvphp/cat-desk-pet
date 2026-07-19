@@ -7,8 +7,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::TAU;
 
-/// Max cached rasters (~53KB each at 120×110). Walking creates many pose keys.
-const MAX_CACHE: usize = 48;
+/// Max cached rasters (~53KB at 1× / ~211KB at 2×). Cap lower at Retina.
+const MAX_CACHE: usize = 32;
 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{Options, Tree};
@@ -32,6 +32,8 @@ struct SpriteKey {
     /// Front-leg Y translate in SVG units, quantized (≈1).
     leg_fl_q: i8,
     leg_fr_q: i8,
+    /// Device pixel ratio bucket (1..=3) for Retina rasters.
+    dpr_q: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -77,8 +79,8 @@ impl SpriteCache {
         }
     }
 
-    pub fn pixels_for(&mut self, pet: &Pet) -> &[u32] {
-        let key = key_for(pet);
+    pub fn pixels_for(&mut self, pet: &Pet, scale: f64) -> &[u32] {
+        let key = key_for(pet, scale);
         if self.cache.contains_key(&key) {
             if let Some(i) = self.order.iter().position(|k| *k == key) {
                 let k = self.order.remove(i).expect("index from position");
@@ -92,7 +94,8 @@ impl SpriteCache {
                     break;
                 }
             }
-            let px = rasterize(key).unwrap_or_else(|| vec![0; (SPRITE_W * SPRITE_H) as usize]);
+            let (sw, sh) = sprite_px(key.dpr_q);
+            let px = rasterize(key).unwrap_or_else(|| vec![0; (sw * sh) as usize]);
             self.cache.insert(key, px);
             self.order.push_back(key);
         }
@@ -100,7 +103,16 @@ impl SpriteCache {
     }
 }
 
-fn key_for(pet: &Pet) -> SpriteKey {
+fn dpr_quant(scale: f64) -> u8 {
+    scale.round().clamp(1.0, 3.0) as u8
+}
+
+fn sprite_px(dpr: u8) -> (u32, u32) {
+    let d = dpr.max(1) as u32;
+    (SPRITE_W * d, SPRITE_H * d)
+}
+
+fn key_for(pet: &Pet, scale: f64) -> SpriteKey {
     let pose = pose_for(pet);
     SpriteKey {
         species: pet.species,
@@ -111,6 +123,7 @@ fn key_for(pet: &Pet) -> SpriteKey {
         tail_q: quantize(pose.tail_deg, 8.0, -36.0, 36.0),
         leg_fl_q: quantize(pose.leg_fl, 2.0, -10.0, 8.0),
         leg_fr_q: quantize(pose.leg_fr, 2.0, -10.0, 8.0),
+        dpr_q: dpr_quant(scale),
     }
 }
 
@@ -584,15 +597,13 @@ fn rasterize(key: SpriteKey) -> Option<Vec<u32>> {
     let svg = build_svg(key);
     let opt = Options::default();
     let tree = Tree::from_str(&svg, &opt).ok()?;
-    let mut pixmap = Pixmap::new(SPRITE_W, SPRITE_H)?;
-    // SVG viewBox is 120×110 — 1:1 with WebView cat size.
-    let ts = Transform::from_scale(
-        SPRITE_W as f32 / 120.0,
-        SPRITE_H as f32 / 110.0,
-    );
+    let (sw, sh) = sprite_px(key.dpr_q);
+    let mut pixmap = Pixmap::new(sw, sh)?;
+    // SVG viewBox is 120×110 — scale up for Retina rasters.
+    let ts = Transform::from_scale(sw as f32 / 120.0, sh as f32 / 110.0);
     resvg::render(&tree, ts, &mut pixmap.as_mut());
 
-    let mut out = Vec::with_capacity((SPRITE_W * SPRITE_H) as usize);
+    let mut out = Vec::with_capacity((sw * sh) as usize);
     for px in pixmap.pixels() {
         // tiny-skia PremultipliedColorU8 → straight-ish ARGB for softbuffer
         let a = px.alpha();
@@ -615,7 +626,7 @@ fn rasterize(key: SpriteKey) -> Option<Vec<u32>> {
     Some(out)
 }
 
-/// Blit cached sprite into the logical WIN buffer, with facing flip + bob.
+/// Blit cached sprite into a **physical** buffer (coords already × scale).
 pub fn blit_sprite(
     buf: &mut [u32],
     win_w: u32,
@@ -625,23 +636,25 @@ pub fn blit_sprite(
     bob: f64,
     dest_cx: f64,
     dest_cy: f64,
+    scale: f64,
 ) {
-    if sprite.len() < (SPRITE_W * SPRITE_H) as usize {
+    let (sw, sh) = sprite_px(dpr_quant(scale));
+    if sprite.len() < (sw * sh) as usize {
         return;
     }
     let flip = facing < 0.0;
     let dest_cy = dest_cy + bob;
-    let left = (dest_cx - SPRITE_W as f64 * 0.5).round() as i32;
-    let top = (dest_cy - SPRITE_H as f64 * 0.55).round() as i32;
+    let left = (dest_cx - sw as f64 * 0.5).round() as i32;
+    let top = (dest_cy - sh as f64 * 0.55).round() as i32;
 
-    for sy in 0..SPRITE_H as i32 {
-        for sx in 0..SPRITE_W as i32 {
+    for sy in 0..sh as i32 {
+        for sx in 0..sw as i32 {
             let src_x = if flip {
-                (SPRITE_W as i32 - 1 - sx) as u32
+                (sw as i32 - 1 - sx) as u32
             } else {
                 sx as u32
             };
-            let c = sprite[(sy as u32 * SPRITE_W + src_x) as usize];
+            let c = sprite[(sy as u32 * sw + src_x) as usize];
             let a = ((c >> 24) & 0xFF) as u8;
             if a < 8 {
                 continue;
