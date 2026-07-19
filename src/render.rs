@@ -2,6 +2,8 @@
 
 #![allow(dead_code)] // shared ellipse/rect helpers + walking fallback body
 
+use std::cell::Cell;
+
 use crate::pet::{
     CoatColor, FlyerKind, GiftKind, Mode, ParticleKind, Pet, Species, ToyKind,
 };
@@ -9,6 +11,24 @@ use crate::sprite::{self, SpriteCache};
 use crate::text;
 
 pub const WIN: u32 = 180;
+
+thread_local! {
+    /// Device scale applied inside low-level fill_* / line helpers.
+    static DRAW_SCALE: Cell<f64> = Cell::new(1.0);
+}
+
+fn draw_scale() -> f64 {
+    DRAW_SCALE.with(|c| c.get())
+}
+
+fn with_draw_scale<R>(scale: f64, f: impl FnOnce() -> R) -> R {
+    DRAW_SCALE.with(|c| {
+        let prev = c.replace(scale.max(0.01));
+        let out = f();
+        c.set(prev);
+        out
+    })
+}
 
 pub fn pack(a: u8, r: u8, g: u8, b: u8) -> u32 {
     ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
@@ -18,9 +38,9 @@ pub fn clear(buf: &mut [u32]) {
     buf.fill(0);
 }
 
-/// Draw pet + world props into a logical canvas.
-/// `origin_x/y` = desktop coords of the window's top-left (so props far from the
-/// pet stay visible when the OS window has grown to `visible_bounds`).
+/// Draw pet + world props into a **physical** canvas (`w/h` already × scale).
+/// `origin_x/y` = desktop logical coords of the window top-left.
+/// `scale` = device pixel ratio; applied to procedural fills + Retina sprites.
 pub fn draw_pet(
     buf: &mut [u32],
     w: u32,
@@ -29,90 +49,104 @@ pub fn draw_pet(
     origin_x: f64,
     origin_y: f64,
     sprites: &mut SpriteCache,
+    scale: f64,
 ) {
     clear(buf);
-    let to_local = |x: f64, y: f64| (x - origin_x, y - origin_y);
-    let (cx, cy) = to_local(pet.x, pet.y);
+    let s = scale.max(0.01);
+    with_draw_scale(s, || {
+        let to_local = |x: f64, y: f64| (x - origin_x, y - origin_y);
+        let (cx, cy) = to_local(pet.x, pet.y);
 
-    if pet.mode == Mode::InBed {
-        let (bx, by) = to_local(pet.home_x, pet.home_y);
-        draw_bed(buf, w, h, bx, by + 18.0);
-    } else if pet.mode == Mode::GoingHome {
-        let (bx, by) = to_local(pet.home_x, pet.home_y);
-        draw_bed(buf, w, h, bx, by + 18.0);
-    }
-
-    let bob = match pet.mode {
-        Mode::Walking
-        | Mode::GoingHome
-        | Mode::Clingy
-        | Mode::Interested
-        | Mode::Chasing
-        | Mode::Playing
-        | Mode::Trick => pet.walk_phase.sin() * 3.0,
-        Mode::Idle => (pet.idle_t * 1.6).sin() * 1.5,
-        Mode::Pet => 0.0, // bob applied in pet tick via y
-        Mode::Sleeping | Mode::InBed => (pet.sleep_t * 0.8).sin() * 0.8 + 6.0,
-        Mode::Dragged => -8.0,
-        Mode::Dizzy => (pet.dizzy_t * 20.0).sin() * 2.0,
-        Mode::Feeding if pet.eat_anim_t > 0.0 => (pet.eat_anim_t * 14.0).sin() * 2.0,
-        Mode::Gifting => (pet.walk_phase).sin() * 1.2,
-        _ => 0.0,
-    };
-
-    let sprite = sprites.pixels_for(pet);
-    if !sprite.is_empty() {
-        sprite::blit_sprite(buf, w, h, sprite, pet.facing, bob, cx, cy);
-    } else {
-        // fallback if resvg fails
-        draw_walking(buf, w, h, cx, cy + bob, pet);
-    }
-
-    if pet.mode == Mode::Sleeping || pet.mode == Mode::InBed {
-        let z_alpha = (((pet.sleep_t * 1.2).sin() * 0.5 + 0.5) * 220.0) as u8;
-        draw_z(buf, w, h, cx + 36.0, cy - 36.0 + bob, z_alpha);
-    }
-
-    // World props in the same desktop→local space as the pet.
-    if let Some(feed) = &pet.feed {
-        let (fx, fy) = to_local(feed.x, feed.y);
-        draw_food(buf, w, h, fx, fy, feed.eat_t.is_some(), pet.species);
-    }
-    if let Some(toy) = &pet.toy {
-        if toy.kind == ToyKind::Laser {
-            draw_laser_trail(buf, w, h, pet, origin_x, origin_y);
+        if pet.mode == Mode::InBed {
+            let (bx, by) = to_local(pet.home_x, pet.home_y);
+            draw_bed(buf, w, h, bx, by + 18.0);
+        } else if pet.mode == Mode::GoingHome {
+            let (bx, by) = to_local(pet.home_x, pet.home_y);
+            draw_bed(buf, w, h, bx, by + 18.0);
         }
-        let (tx, ty) = to_local(toy.x, toy.y);
-        match toy.kind {
-            ToyKind::Yarn => draw_yarn(buf, w, h, tx, ty, toy.age),
-            ToyKind::Ball => draw_ball(buf, w, h, tx, ty),
-            ToyKind::Paper => draw_paper(buf, w, h, tx, ty, toy.spin),
-            ToyKind::Mouse => draw_mouse_toy(buf, w, h, tx, ty, toy.spin),
-            ToyKind::Laser => draw_laser(buf, w, h, tx, ty, toy.age),
-            ToyKind::Wand => draw_wand(buf, w, h, tx, ty, toy.spin),
-        }
-    }
-    if let Some(flyer) = &pet.flyer {
-        let (fx, fy) = to_local(flyer.x, flyer.y);
-        match flyer.kind {
-            FlyerKind::Bird => draw_bird(buf, w, h, fx, fy, flyer.vx),
-            FlyerKind::Butterfly => draw_butterfly(buf, w, h, fx, fy, flyer.age),
-        }
-    }
-    for p in &pet.particles {
-        let (px, py) = to_local(p.x, p.y);
-        draw_particle(buf, w, h, px, py, p);
-    }
 
-    if let Some(b) = &pet.bubble {
-        let (bx, by) = to_local(pet.x, pet.y - 58.0);
-        draw_speech_bubble(buf, w, h, bx, by, b);
-    }
+        let bob = match pet.mode {
+            Mode::Walking
+            | Mode::GoingHome
+            | Mode::Clingy
+            | Mode::Interested
+            | Mode::Chasing
+            | Mode::Playing
+            | Mode::Trick => pet.walk_phase.sin() * 3.0,
+            Mode::Idle => (pet.idle_t * 1.6).sin() * 1.5,
+            Mode::Pet => 0.0, // bob applied in pet tick via y
+            Mode::Sleeping | Mode::InBed => (pet.sleep_t * 0.8).sin() * 0.8 + 6.0,
+            Mode::Dragged => -8.0,
+            Mode::Dizzy => (pet.dizzy_t * 20.0).sin() * 2.0,
+            Mode::Feeding if pet.eat_anim_t > 0.0 => (pet.eat_anim_t * 14.0).sin() * 2.0,
+            Mode::Gifting => (pet.walk_phase).sin() * 1.2,
+            _ => 0.0,
+        };
 
-    if let Some(gift) = &pet.gift {
-        let (gx, gy) = to_local(gift.x, gift.y);
-        draw_gift(buf, w, h, gx, gy, gift.kind, gift.fade);
-    }
+        let sprite = sprites.pixels_for(pet, s);
+        if !sprite.is_empty() {
+            // Dest uses the same quantized d as the pixmap (not raw window scale).
+            let d = sprite::layout_scale(s);
+            sprite::blit_sprite(
+                buf,
+                w,
+                h,
+                sprite,
+                pet.facing,
+                bob * d,
+                cx * d,
+                cy * d,
+                d,
+            );
+        } else {
+            draw_walking(buf, w, h, cx, cy + bob, pet);
+        }
+
+        if pet.mode == Mode::Sleeping || pet.mode == Mode::InBed {
+            let z_alpha = (((pet.sleep_t * 1.2).sin() * 0.5 + 0.5) * 220.0) as u8;
+            draw_z(buf, w, h, cx + 36.0, cy - 36.0 + bob, z_alpha);
+        }
+
+        if let Some(feed) = &pet.feed {
+            let (fx, fy) = to_local(feed.x, feed.y);
+            draw_food(buf, w, h, fx, fy, feed.eat_t.is_some(), pet.species);
+        }
+        if let Some(toy) = &pet.toy {
+            if toy.kind == ToyKind::Laser {
+                draw_laser_trail(buf, w, h, pet, origin_x, origin_y);
+            }
+            let (tx, ty) = to_local(toy.x, toy.y);
+            match toy.kind {
+                ToyKind::Yarn => draw_yarn(buf, w, h, tx, ty, toy.age),
+                ToyKind::Ball => draw_ball(buf, w, h, tx, ty),
+                ToyKind::Paper => draw_paper(buf, w, h, tx, ty, toy.spin),
+                ToyKind::Mouse => draw_mouse_toy(buf, w, h, tx, ty, toy.spin),
+                ToyKind::Laser => draw_laser(buf, w, h, tx, ty, toy.age),
+                ToyKind::Wand => draw_wand(buf, w, h, tx, ty, toy.spin),
+            }
+        }
+        if let Some(flyer) = &pet.flyer {
+            let (fx, fy) = to_local(flyer.x, flyer.y);
+            match flyer.kind {
+                FlyerKind::Bird => draw_bird(buf, w, h, fx, fy, flyer.vx),
+                FlyerKind::Butterfly => draw_butterfly(buf, w, h, fx, fy, flyer.age),
+            }
+        }
+        for p in &pet.particles {
+            let (px, py) = to_local(p.x, p.y);
+            draw_particle(buf, w, h, px, py, p);
+        }
+
+        if let Some(b) = &pet.bubble {
+            let (bx, by) = to_local(pet.x, pet.y - 58.0);
+            draw_speech_bubble(buf, w, h, bx, by, b);
+        }
+
+        if let Some(gift) = &pet.gift {
+            let (gx, gy) = to_local(gift.x, gift.y);
+            draw_gift(buf, w, h, gx, gy, gift.kind, gift.fade);
+        }
+    });
 
     // Camera flash: punch opaque pixels toward white (keep clear areas clear).
     if pet.flash > 0.02 {
@@ -350,6 +384,8 @@ fn fill_triangle_alpha(
     g: u8,
     b: u8,
 ) {
+    let s = draw_scale();
+    let (x0, y0, x1, y1, x2, y2) = (x0 * s, y0 * s, x1 * s, y1 * s, x2 * s, y2 * s);
     let min_x = (x0.min(x1).min(x2) - 1.0).floor().max(0.0) as i32;
     let max_x = (x0.max(x1).max(x2) + 1.0).ceil().min(w as f64 - 1.0) as i32;
     let min_y = (y0.min(y1).min(y2) - 1.0).floor().max(0.0) as i32;
@@ -537,7 +573,8 @@ fn draw_line_alpha(
     if len < 0.5 {
         return;
     }
-    let steps = (len * 1.5).ceil() as i32;
+    // Sample in physical space: fill_ellipse_alpha multiplies coords by DRAW_SCALE.
+    let steps = (len * 1.5 * draw_scale()).ceil().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f64 / steps as f64;
         let x = x0 + dx * t;
@@ -559,6 +596,8 @@ fn fill_ellipse_alpha(
     g: u8,
     b: u8,
 ) {
+    let s = draw_scale();
+    let (cx, cy, rx, ry) = (cx * s, cy * s, rx * s, ry * s);
     let x0 = (cx - rx).floor().max(0.0) as i32;
     let y0 = (cy - ry).floor().max(0.0) as i32;
     let x1 = (cx + rx).ceil().min(w as f64 - 1.0) as i32;
@@ -797,51 +836,66 @@ fn draw_speech_bubble(
     cy: f64,
     bubble: &crate::pet::SpeechBubble,
 ) {
+    let dpr = draw_scale();
     const PX: f32 = 13.0;
-    let (tw, th) = text::measure(&bubble.text, PX);
-    let pad_x = 12.0;
-    let pad_y = 7.0;
-    let scale = bubble.pop_scale();
-    let bw = (tw as f64 + pad_x * 2.0) * scale;
-    let bh = (th as f64 + pad_y * 2.0).max(22.0) * scale;
-    let x0 = cx - bw * 0.5;
-    let y0 = cy - bh;
-    // White capsule + soft shadow tint.
-    fill_round_rect(buf, w, h, x0 + 1.0, y0 + 2.0, bw, bh, 11.0 * scale, 0xE8, 0xE0, 0xD8, 90);
-    fill_round_rect(buf, w, h, x0, y0, bw, bh, 11.0 * scale, 0xFF, 0xFF, 0xFF, 245);
-    // Tail triangle pointing down at pet.
-    let tx = cx;
-    let ty = y0 + bh;
-    fill_triangle_alpha(
-        buf,
-        w,
-        h,
-        tx - 5.0 * scale,
-        ty,
-        tx + 5.0 * scale,
-        ty,
-        tx,
-        ty + 7.0 * scale,
-        245,
-        0xFF,
-        0xFF,
-        0xFF,
-    );
-    let text_x = x0 + pad_x * scale;
-    let text_y = y0 + pad_y * scale * 0.6;
-    text::blit_text(
-        buf,
-        w,
-        h,
-        text_x,
-        text_y,
-        &bubble.text,
-        PX * scale as f32,
-        0x3A,
-        0x2A,
-        0x20,
-        1.0,
-    );
+    let (tw, th) = text::measure(&bubble.text, PX * dpr as f32);
+    let pad_x = 12.0 * dpr;
+    let pad_y = 7.0 * dpr;
+    let pop = bubble.pop_scale();
+    let bw = (tw as f64 + pad_x * 2.0) * pop;
+    let bh = (th as f64 + pad_y * 2.0).max(22.0 * dpr) * pop;
+    // Layout already in physical px — bypass DRAW_SCALE inside fills.
+    with_draw_scale(1.0, || {
+        let x0 = cx * dpr - bw * 0.5;
+        let y0 = cy * dpr - bh;
+        fill_round_rect(
+            buf,
+            w,
+            h,
+            x0 + 1.0 * dpr,
+            y0 + 2.0 * dpr,
+            bw,
+            bh,
+            11.0 * pop * dpr,
+            0xE8,
+            0xE0,
+            0xD8,
+            90,
+        );
+        fill_round_rect(buf, w, h, x0, y0, bw, bh, 11.0 * pop * dpr, 0xFF, 0xFF, 0xFF, 245);
+        let tx = cx * dpr;
+        let ty = y0 + bh;
+        fill_triangle_alpha(
+            buf,
+            w,
+            h,
+            tx - 5.0 * pop * dpr,
+            ty,
+            tx + 5.0 * pop * dpr,
+            ty,
+            tx,
+            ty + 7.0 * pop * dpr,
+            245,
+            0xFF,
+            0xFF,
+            0xFF,
+        );
+        let text_x = x0 + pad_x * pop;
+        let text_y = y0 + pad_y * pop * 0.6;
+        text::blit_text(
+            buf,
+            w,
+            h,
+            text_x,
+            text_y,
+            &bubble.text,
+            PX * dpr as f32 * pop as f32,
+            0x3A,
+            0x2A,
+            0x20,
+            1.0,
+        );
+    });
 }
 
 fn draw_particle(
@@ -856,6 +910,7 @@ fn draw_particle(
     if a < 8 {
         return;
     }
+    let dpr = draw_scale();
     match p.kind {
         ParticleKind::Heart | ParticleKind::Kiss => {
             let label = if p.kind == ParticleKind::Kiss {
@@ -863,10 +918,34 @@ fn draw_particle(
             } else {
                 "❤"
             };
-            text::blit_text(buf, w, h, x - 6.0, y - 8.0, label, 14.0, 0xE0, 0x40, 0x70, p.alpha() as f32);
+            text::blit_text(
+                buf,
+                w,
+                h,
+                (x - 6.0) * dpr,
+                (y - 8.0) * dpr,
+                label,
+                14.0 * dpr as f32,
+                0xE0,
+                0x40,
+                0x70,
+                p.alpha() as f32,
+            );
         }
         ParticleKind::Zzz => {
-            text::blit_text(buf, w, h, x, y, "Z", 12.0, 0x55, 0x44, 0x66, p.alpha() as f32);
+            text::blit_text(
+                buf,
+                w,
+                h,
+                x * dpr,
+                y * dpr,
+                "Z",
+                12.0 * dpr as f32,
+                0x55,
+                0x44,
+                0x66,
+                p.alpha() as f32,
+            );
         }
         ParticleKind::Dust => {
             fill_ellipse_alpha(buf, w, h, x, y, 4.0 + p.t() * 6.0, 3.0 + p.t() * 4.0, a / 2, 0xC0, 0xB0, 0xA0);
@@ -881,7 +960,19 @@ fn draw_particle(
         ParticleKind::Dream => {
             let label = p.label.unwrap_or("💤");
             fill_round_rect(buf, w, h, x - 12.0, y - 10.0, 28.0, 22.0, 8.0, 0xFF, 0xFF, 0xFF, a);
-            text::blit_text(buf, w, h, x - 8.0, y - 8.0, label, 14.0, 0x3A, 0x2A, 0x20, p.alpha() as f32);
+            text::blit_text(
+                buf,
+                w,
+                h,
+                (x - 8.0) * dpr,
+                (y - 8.0) * dpr,
+                label,
+                14.0 * dpr as f32,
+                0x3A,
+                0x2A,
+                0x20,
+                p.alpha() as f32,
+            );
         }
     }
 }
@@ -900,6 +991,8 @@ fn fill_round_rect(
     b: u8,
     a: u8,
 ) {
+    let s = draw_scale();
+    let (x, y, rw, rh, radius) = (x * s, y * s, rw * s, rh * s, radius * s);
     if rw <= 0.0 || rh <= 0.0 || a == 0 {
         return;
     }
@@ -1009,6 +1102,8 @@ fn fill_ellipse(
     g: u8,
     b: u8,
 ) {
+    let s = draw_scale();
+    let (cx, cy, rx, ry) = (cx * s, cy * s, rx * s, ry * s);
     let x0 = (cx - rx).floor().max(0.0) as i32;
     let y0 = (cy - ry).floor().max(0.0) as i32;
     let x1 = (cx + rx).ceil().min(w as f64 - 1.0) as i32;
@@ -1040,6 +1135,8 @@ fn fill_triangle(
     g: u8,
     b: u8,
 ) {
+    let s = draw_scale();
+    let (x0, y0, x1, y1, x2, y2) = (x0 * s, y0 * s, x1 * s, y1 * s, x2 * s, y2 * s);
     let min_x = x0.min(x1).min(x2).floor().max(0.0) as i32;
     let max_x = x0.max(x1).max(x2).ceil().min(w as f64 - 1.0) as i32;
     let min_y = y0.min(y1).min(y2).floor().max(0.0) as i32;
@@ -1081,6 +1178,8 @@ fn fill_rect_alpha(
     g: u8,
     b: u8,
 ) {
+    let s = draw_scale();
+    let (x, y, rw, rh) = (x * s, y * s, rw * s, rh * s);
     let x0 = x.floor().max(0.0) as i32;
     let y0 = y.floor().max(0.0) as i32;
     let x1 = (x + rw).ceil().min(w as f64 - 1.0) as i32;

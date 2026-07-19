@@ -25,17 +25,28 @@ cargo run --release -- --mode sleeping   # sleeping | idle | walking
 
 - OS 窗位提交节流：漂移 ≥6px 且间隔 ≥80ms 才 `set_outer_position`
 - 窗内像素偏移补偿，走路动画仍跟逻辑坐标
-- walking 画帧 ~18fps；穿透轮询随模式降频
+- walking 画帧 ~25fps；穿透轮询随模式降频
+- Retina：精灵按 dpr（0.25 步进量化）栅格化，直接绘制到物理缓冲（不再整帧 NN 放大）
+- **取舍**：sharpness / ~25fps ↔ 稳态 CPU·RSS 高于 issue #3 的 1×·~18fps 验收线；尖峰 footprint 仍 ≪ 200MB
 
 ### 内存尖峰（issue #3）
 
 - 可绘制窗边长硬顶 ~480；远距飞鸟/激光拖尾裁切，不再把主窗拉到接近全屏
-- macOS `present_argb`：逻辑绘制后 NN 到物理像素再 present（`contentsScale` 匹配，避免气泡锯齿）；premull 缓冲回收复用（CGImage 持有所有权）。窗边硬顶后物理缓冲仍远低于 200MB
+- macOS `present_argb`：物理像素 1:1 present（`contentsScale` 匹配）；premull 缓冲回收复用（CGImage 持有所有权）。窗边硬顶后物理缓冲仍远低于 200MB
 - 气泡字体改为打包 Noto 子集 `assets/fonts/pet-ui.ttf`（~26KB，OFL，含 ♡❤♪ω∇），不再整文件加载 Arial Unicode（~22MB）
 
-### 实测 — 2026-07-19 / issue #3（release）
+### 实测 — 2026-07-19 / Retina restore（PR #5，release）
 
-warm ≥5s；CPU/RSS：`ps` 1Hz ×15s；尖峰：`vmmap -summary` Physical footprint (peak)。
+warm ≥5s；CPU 短样；尖峰：`vmmap -summary` Physical footprint (peak)。相对 #3：走路更清晰、~25fps，稳态 CPU/RSS 升高属预期。
+
+| 场景 | avg %CPU | RSS | footprint / peak |
+|------|---------:|----:|-----------------:|
+| walking（warm） | **~8.6**（短样） | ~88 MB | ~20 / **20.9 MB** |
+| walking + `--stress-props`（鸟+激光） | — | ~98 MB | — / **42.5 MB** |
+
+### 实测 — 2026-07-19 / issue #3（release，1× 画布 · 较低 FPS，对照）
+
+warm ≥5s；CPU/RSS：`ps` 1Hz ×15s；尖峰：`vmmap -summary` Physical footprint (peak)。此表为合入 #4 后、恢复 Retina 前的稳态线。
 
 | 场景 | avg %CPU | RSS | footprint / peak |
 |------|---------:|----:|-----------------:|

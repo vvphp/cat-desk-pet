@@ -79,9 +79,7 @@ struct App {
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     pet: Pet,
     sprites: SpriteCache,
-    /// Logical canvas (straight ARGB).
-    pixels: Vec<u32>,
-    /// Physical buffer for Retina upscale / present.
+    /// Physical framebuffer (straight ARGB, logical size × scale_factor).
     present_buf: Vec<u32>,
     last_tick: Instant,
     next_frame: Instant,
@@ -134,7 +132,6 @@ impl App {
             surface: None,
             pet: Pet::new(screen_w, screen_h),
             sprites: SpriteCache::new(),
-            pixels: vec![0; (WIN * WIN) as usize],
             present_buf: Vec::new(),
             last_tick: now,
             next_frame: now,
@@ -199,10 +196,6 @@ impl App {
             let _ = window.request_inner_size(LogicalSize::new(lw, lh));
             self.view_w = lw;
             self.view_h = lh;
-            // Keep hit/draw buffer in sync before the next redraw (passthrough
-            // may run in the same tick).
-            let need = (lw as usize).saturating_mul(lh as usize);
-            self.pixels.resize(need, 0);
         }
 
         if should_move {
@@ -218,19 +211,17 @@ impl App {
             return;
         };
 
-        // Paint in logical view space (capped; see `Pet::visible_bounds`), then
-        // nearest-neighbor upscale to physical pixels for Retina. Logical-only
-        // present + contentsScale made bubble/text edges severely jagged.
-        // Use committed view size (not lagging inner_size) so a pending
-        // request_inner_size can't present one wrong frame while the OS catches up.
+        // Paint directly into a physical (Retina) buffer: SVG sprites are
+        // rasterized at dpr, procedural draws scale via render::DRAW_SCALE.
+        // Window geometry stays logical (`view_w/h`); only the framebuffer is ×scale.
         let lw = self.view_w.max(1);
         let lh = self.view_h.max(1);
         let scale = window.scale_factor().max(0.01);
         let pw = ((lw as f64) * scale).round().max(1.0) as u32;
         let ph = ((lh as f64) * scale).round().max(1.0) as u32;
-        let need = (lw as usize).saturating_mul(lh as usize);
-        if self.pixels.len() != need {
-            self.pixels.resize(need, 0);
+        let phys = (pw as usize).saturating_mul(ph as usize);
+        if self.present_buf.len() != phys {
+            self.present_buf.resize(phys, 0);
         }
 
         let (ox, oy) = self.last_win_pos.unwrap_or_else(|| {
@@ -238,24 +229,15 @@ impl App {
             (x, y)
         });
         render::draw_pet(
-            &mut self.pixels,
-            lw,
-            lh,
+            &mut self.present_buf,
+            pw,
+            ph,
             &self.pet,
             ox,
             oy,
             &mut self.sprites,
+            scale,
         );
-
-        let phys = (pw as usize).saturating_mul(ph as usize);
-        if self.present_buf.len() != phys {
-            self.present_buf.resize(phys, 0);
-        }
-        if pw != lw || ph != lh {
-            blit_nn(&self.pixels, lw, lh, &mut self.present_buf, pw, ph);
-        } else {
-            self.present_buf.copy_from_slice(&self.pixels[..need]);
-        }
 
         #[cfg(target_os = "macos")]
         {
@@ -1054,27 +1036,6 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (menu, window);
-        }
-    }
-}
-
-/// Nearest-neighbor blit from a logical canvas to a physical present buffer.
-fn blit_nn(src: &[u32], sw: u32, sh: u32, dst: &mut [u32], dw: u32, dh: u32) {
-    let need = (dw * dh) as usize;
-    if dst.len() < need || sw == 0 || sh == 0 {
-        return;
-    }
-    if sw == dw && sh == dh {
-        dst[..need].copy_from_slice(&src[..need.min(src.len())]);
-        return;
-    }
-    for y in 0..dh {
-        let sy = (y as u64 * sh as u64 / dh as u64) as u32;
-        let src_row = (sy * sw) as usize;
-        let dst_row = (y * dw) as usize;
-        for x in 0..dw {
-            let sx = (x as u64 * sw as u64 / dw as u64) as u32;
-            dst[dst_row + x as usize] = src[src_row + sx as usize];
         }
     }
 }
