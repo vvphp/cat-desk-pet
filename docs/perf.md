@@ -2,6 +2,8 @@
 
 本仓库默认入口即为原生 `cat-desk-pet`（**无 WebView**）：小窗 (~180×180) + SVG/CPU 精灵 + 走路/闲置/睡觉 + 拖拽唤醒 + 点击穿透 + 托盘退出。
 
+Issue #6 的 native / `wgpu` 双后端测量口径与报告模板见 [`renderer-benchmark.md`](renderer-benchmark.md)。在同机对照完成前，历史数据不能作为切换默认后端的依据。
+
 ## 运行
 
 ```bash

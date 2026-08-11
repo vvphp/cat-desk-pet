@@ -1,5 +1,6 @@
 /target/
 /dist/
+/benchmark-results/
 **/*.rs.bk
 .DS_Store
 *.log
