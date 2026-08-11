@@ -6,6 +6,7 @@
 //! Or:
 //!   cargo run --release
 
+mod atlas;
 mod pet;
 mod render;
 mod renderer;
