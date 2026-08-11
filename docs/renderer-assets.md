@@ -35,6 +35,11 @@ mouth, tail, and legs are independent atlas regions. Tail rotation and leg
 translation remain transforms, so the compiler does not generate the forbidden
 `species x coat x eyes x mouth x pose` Cartesian product.
 
+Each region declares its allowed semantic roles. Antialiased overlaps are
+quantized only within that region-specific set, preventing blended eye/body
+edges from becoming unrelated roles. Tests scan every non-transparent atlas
+pixel and reject roles outside its region allowlist.
+
 The source is rasterized once at 3x. Native composition samples the same indexed
 regions into its DPR-quantized cache. The `wgpu` backend can upload the RG8 bytes
 directly and apply the same palette and transforms in its shader.

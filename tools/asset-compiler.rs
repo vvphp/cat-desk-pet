@@ -49,141 +49,175 @@ const COMPONENTS: &str = "#layer-shadow,#tail,#body-shell,.pattern,#belly-defaul
 struct Layer {
     name: &'static str,
     show: &'static str,
+    allowed_roles: &'static [u8],
 }
 
 const LAYERS: &[Layer] = &[
     Layer {
         name: "shadow",
         show: "#layer-shadow",
+        allowed_roles: &[18],
     },
     Layer {
         name: "tail-cat",
         show: "#tail",
+        allowed_roles: &[1],
     },
     Layer {
         name: "body-shell",
         show: "#body-shell",
+        allowed_roles: &[1],
     },
     Layer {
         name: "pattern-stripes",
         show: ".pattern-stripes",
+        allowed_roles: &[2],
     },
     Layer {
         name: "pattern-patches",
         show: ".pattern-patches",
+        allowed_roles: &[2, 9],
     },
     Layer {
         name: "pattern-cow",
         show: ".pattern-cow",
+        allowed_roles: &[2],
     },
     Layer {
         name: "pattern-tuxedo",
         show: ".pattern-tuxedo",
+        allowed_roles: &[3],
     },
     Layer {
         name: "belly",
         show: "#belly-default",
+        allowed_roles: &[3],
     },
     Layer {
         name: "cat-ears",
         show: "#cat-ears",
+        allowed_roles: &[1, 4],
     },
     Layer {
         name: "muzzle",
         show: "#face-muzzle",
+        allowed_roles: &[3],
     },
     Layer {
         name: "eye-normal",
         show: "#eye-l,#eye-r,.eye-normal",
+        allowed_roles: &[6, 11],
     },
     Layer {
         name: "eye-wide",
         show: "#eye-l,#eye-r,.eye-wide",
+        allowed_roles: &[6, 11],
     },
     Layer {
         name: "eye-hearts",
         show: "#eye-l,#eye-r,.eye-hearts",
+        allowed_roles: &[11, 14],
     },
     Layer {
         name: "eye-stars",
         show: "#eye-l,#eye-r,.eye-stars",
+        allowed_roles: &[11, 15, 16],
     },
     Layer {
         name: "eye-x",
         show: "#eye-l,#eye-r,.eye-x",
+        allowed_roles: &[6],
     },
     Layer {
         name: "eye-happy",
         show: "#eye-l,#eye-r,.eye-happy",
+        allowed_roles: &[6],
     },
     Layer {
         name: "eye-angry",
         show: "#eye-l,#eye-r,.eye-angry",
+        allowed_roles: &[6, 11],
     },
     Layer {
         name: "cat-nose",
         show: "#cat-nose",
+        allowed_roles: &[5],
     },
     Layer {
         name: "mouth-normal",
         show: "#mouth,.mouth-normal",
+        allowed_roles: &[12],
     },
     Layer {
         name: "mouth-smile",
         show: "#mouth,.mouth-smile",
+        allowed_roles: &[12],
     },
     Layer {
         name: "mouth-grumpy",
         show: "#mouth,.mouth-grumpy",
+        allowed_roles: &[12],
     },
     Layer {
         name: "mouth-tongue",
         show: "#mouth,.mouth-tongue",
+        allowed_roles: &[12, 13],
     },
     Layer {
         name: "mouth-shy",
         show: "#mouth,.mouth-shy",
+        allowed_roles: &[12],
     },
     Layer {
         name: "mouth-pursed",
         show: "#mouth,.mouth-pursed",
+        allowed_roles: &[12],
     },
     Layer {
         name: "blush",
         show: "#blush",
+        allowed_roles: &[8],
     },
     Layer {
         name: "whiskers",
         show: "#whisker-l,#whisker-r",
+        allowed_roles: &[7],
     },
     Layer {
         name: "leg-fl",
         show: "#leg-fl",
+        allowed_roles: &[2],
     },
     Layer {
         name: "leg-fr",
         show: "#leg-fr",
+        allowed_roles: &[2],
     },
     Layer {
         name: "tail-pig",
         show: "#tail-pig",
+        allowed_roles: &[2],
     },
     Layer {
         name: "species-pig",
         show: "#species-pig",
+        allowed_roles: &[2, 4, 10, 17],
     },
     Layer {
         name: "tail-bear",
         show: "#tail-bear",
+        allowed_roles: &[1],
     },
     Layer {
         name: "species-bear",
         show: "#species-bear",
+        allowed_roles: &[1, 4, 11, 18],
     },
 ];
 
 struct LayerImage {
     name: &'static str,
+    allowed_roles: &'static [u8],
     crop_x: u32,
     crop_y: u32,
     width: u32,
@@ -241,10 +275,12 @@ fn indexed_svg(layer: &Layer) -> String {
     svg
 }
 
-fn nearest_role(r: u8, g: u8, b: u8) -> u8 {
-    let mut best = 1usize;
+fn nearest_role(r: u8, g: u8, b: u8, allowed_roles: &[u8]) -> u8 {
+    let mut best = allowed_roles[0] as usize;
     let mut best_dist = u32::MAX;
-    for (role, marker) in ROLE_MARKERS.iter().enumerate().skip(1) {
+    for &role in allowed_roles {
+        let role = role as usize;
+        let marker = ROLE_MARKERS[role];
         let dr = r as i32 - marker[0] as i32;
         let dg = g as i32 - marker[1] as i32;
         let db = b as i32 - marker[2] as i32;
@@ -258,6 +294,14 @@ fn nearest_role(r: u8, g: u8, b: u8) -> u8 {
 }
 
 fn render_layer(layer: &Layer) -> Result<LayerImage, String> {
+    if layer.allowed_roles.is_empty()
+        || layer
+            .allowed_roles
+            .iter()
+            .any(|&role| role == 0 || role as usize >= ROLE_MARKERS.len())
+    {
+        return Err(format!("{} has invalid allowed roles", layer.name));
+    }
     let svg = indexed_svg(layer);
     let tree = Tree::from_str(&svg, &Options::default())
         .map_err(|e| format!("{}: SVG parse failed: {e}", layer.name))?;
@@ -291,6 +335,7 @@ fn render_layer(layer: &Layer) -> Result<LayerImage, String> {
             unpremul(pixel.red()),
             unpremul(pixel.green()),
             unpremul(pixel.blue()),
+            layer.allowed_roles,
         );
         indexed[i * 2] = role;
         indexed[i * 2 + 1] = a;
@@ -320,6 +365,7 @@ fn render_layer(layer: &Layer) -> Result<LayerImage, String> {
     }
     Ok(LayerImage {
         name: layer.name,
+        allowed_roles: layer.allowed_roles,
         crop_x: min_x,
         crop_y: min_y,
         width: crop_w,
@@ -374,7 +420,7 @@ fn compile() -> Result<(Vec<u8>, String), String> {
     for layer in &layers {
         writeln!(
             manifest,
-            "    AtlasRegion {{ name: {:?}, x: {}, y: {}, width: {}, height: {}, source_x: {}, source_y: {} }},",
+            "    AtlasRegion {{ name: {:?}, x: {}, y: {}, width: {}, height: {}, source_x: {}, source_y: {}, allowed_roles: &{:?} }},",
             layer.name,
             layer.atlas_x,
             layer.atlas_y,
@@ -382,6 +428,7 @@ fn compile() -> Result<(Vec<u8>, String), String> {
             layer.height,
             layer.crop_x,
             layer.crop_y,
+            layer.allowed_roles,
         )
         .unwrap();
     }
