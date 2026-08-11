@@ -56,6 +56,7 @@ run_one() {
   backend="$1"
   scenario="$2"
   round="$3"
+  reported_backend="$backend"
   mode="$scenario"
   binary="$NATIVE_BINARY"
   renderer="native"
@@ -66,14 +67,17 @@ run_one() {
     binary="$WGPU_BINARY"
     renderer="wgpu"
     expected="wgpu path=atlas-direct"
+    if [[ "$scenario" = "idle" ]]; then
+      reported_backend="wgpu-hybrid"
+    fi
   fi
   if [[ "$scenario" = "stress-props" ]]; then
     mode="walking"
     extra="--stress-props"
   fi
 
-  app_log="$OUT_DIR/app-${scenario}-${backend}-r${round}.log"
-  printf '%s round=%s scenario=%s backend=%s\n' "$(date '+%F %T')" "$round" "$scenario" "$backend" | tee -a "$ORDER_FILE"
+  app_log="$OUT_DIR/app-${scenario}-${reported_backend}-r${round}.log"
+  printf '%s round=%s scenario=%s backend=%s\n' "$(date '+%F %T')" "$round" "$scenario" "$reported_backend" | tee -a "$ORDER_FILE"
 
   # AppKit/winit needs the caller to run this wrapper from a real terminal.
   # The child inherits that terminal; its output is captured independently.
@@ -93,20 +97,20 @@ run_one() {
   "$ROOT/tools/benchmark-renderer.sh" \
     --pid "$APP_PID" \
     --scenario "$scenario" \
-    --backend "$backend-r$round" \
+    --backend "$reported_backend-r$round" \
     --warm "$WARM_SECONDS" \
     --seconds "$SAMPLE_SECONDS" \
     --out-dir "$OUT_DIR" \
     --binary "$binary"
   stop_app
-  if [[ "$backend" = "wgpu-atlas" ]] && grep -q 'native-upload-fallback' "$app_log"; then
+  if [[ "$reported_backend" = "wgpu-atlas" ]] && grep -q 'native-upload-fallback' "$app_log"; then
     echo "wgpu direct-path violation; invalidating run: $app_log" >&2
     exit 1
   fi
   sleep 1
 }
 
-for scenario in sleeping idle walking stress-props; do
+for scenario in ${BENCHMARK_SCENARIOS:-sleeping idle walking stress-props}; do
   run_one native "$scenario" 1
   run_one wgpu-atlas "$scenario" 1
   run_one wgpu-atlas "$scenario" 2

@@ -65,7 +65,7 @@ tools/benchmark-renderer.sh \
   --binary target/release/cat-desk-pet
 ```
 
-For a wgpu sample, first confirm stderr contains both `renderer=wgpu` and `wgpu path=atlas-direct`, then pass `--backend wgpu-atlas` and the frozen wgpu binary path. Record a fallback run as `wgpu-native-upload-fallback` instead.
+For a direct wgpu sample, first confirm stderr contains both `renderer=wgpu` and `wgpu path=atlas-direct`, then pass `--backend wgpu-atlas` and the frozen wgpu binary path. Record a run that enters fallback as `wgpu-hybrid` instead. The realistic fixed idle workload currently uses the hybrid label because some idle actions create bubbles or particles.
 
 On macOS, the complete alternating 4-scenario x 2-backend x 3-round matrix can be run with:
 

@@ -22,7 +22,7 @@ The experimental backend reports its active path to stderr:
 - `wgpu path=atlas-direct`: indexed RG8 atlas + palette texture, per-layer transforms, bed/sleep marks, bird, laser, and laser trail are encoded directly on the GPU.
 - `wgpu path=native-upload-fallback`: unsupported interactive content is rendered by `NativeRenderer` and uploaded to the same transparent wgpu Surface. The fallback is allocated lazily.
 
-The fixed sleeping, idle, walking, and bird-plus-laser benchmark scenes use `atlas-direct`. Feed, gifts, text bubbles, particles, non-laser toys, and butterfly currently select the fallback. This preserves behavior while keeping the benchmark honest: a fallback run must not be labelled `wgpu-atlas` in comparison data.
+The fixed sleeping, walking, and bird-plus-laser benchmark scenes use `atlas-direct`. The realistic fixed idle scene can produce action bubbles or particles and is therefore a hybrid run. Feed, gifts, text bubbles, particles, non-laser toys, and butterfly currently select the fallback. This preserves behavior while keeping the benchmark honest: a run that enters fallback must not be labelled `wgpu-atlas` in comparison data.
 
 Both paths share `RenderSnapshot` and `FrameKey`. An unchanged frame is not acquired, encoded, submitted, or presented unless the window system explicitly requests a forced redraw.
 
