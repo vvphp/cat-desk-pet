@@ -8,6 +8,7 @@
 
 mod pet;
 mod render;
+mod renderer;
 mod sprite;
 mod text;
 
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use pet::{CoatColor, ForceScene, Mode, Pet, Species, ToyKind};
 use render::WIN;
-use sprite::SpriteCache;
+use renderer::{FrameViewport, NativeRenderer, RenderSnapshot, Renderer, PET_HIT_LEAVE_SCALE};
 #[cfg(not(target_os = "macos"))]
 use softbuffer::{Context, Surface};
 use tray_icon::menu::{
@@ -78,9 +79,7 @@ struct App {
     #[cfg(not(target_os = "macos"))]
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     pet: Pet,
-    sprites: SpriteCache,
-    /// Physical framebuffer (straight ARGB, logical size × scale_factor).
-    present_buf: Vec<u32>,
+    renderer: NativeRenderer,
     last_tick: Instant,
     next_frame: Instant,
     _tray: Option<tray_icon::TrayIcon>,
@@ -113,12 +112,6 @@ const WIN_MOVE_THRESHOLD: f64 = 6.0;
 const WIN_MOVE_MIN_INTERVAL: Duration = Duration::from_millis(80);
 /// Ignore sub-threshold view size jitter from ceil/round while props move.
 const VIEW_SIZE_THRESHOLD: u32 = 8;
-/// Shared alpha hit pad for passthrough capture and click/context menu.
-const PET_HIT_PAD: i32 = 4;
-/// Leave-capture ellipse scale (enter uses 1.0). Stops bob/orbit from
-/// flipping `ignoresMouseEvents` every frame under the cursor.
-const PET_HIT_LEAVE_SCALE: f64 = 1.4;
-
 impl App {
     fn new(screen_w: f64, screen_h: f64) -> Self {
         let now = Instant::now();
@@ -131,8 +124,7 @@ impl App {
             #[cfg(not(target_os = "macos"))]
             surface: None,
             pet: Pet::new(screen_w, screen_h),
-            sprites: SpriteCache::new(),
-            present_buf: Vec::new(),
+            renderer: NativeRenderer::new(),
             last_tick: now,
             next_frame: now,
             _tray: None,
@@ -206,7 +198,10 @@ impl App {
         size_changed || should_move
     }
 
-    fn redraw(&mut self) {
+    fn redraw(&mut self, force_present: bool) {
+        if self.hidden {
+            return;
+        }
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -219,29 +214,30 @@ impl App {
         let scale = window.scale_factor().max(0.01);
         let pw = ((lw as f64) * scale).round().max(1.0) as u32;
         let ph = ((lh as f64) * scale).round().max(1.0) as u32;
-        let phys = (pw as usize).saturating_mul(ph as usize);
-        if self.present_buf.len() != phys {
-            self.present_buf.resize(phys, 0);
-        }
 
         let (ox, oy) = self.last_win_pos.unwrap_or_else(|| {
             let (x, y, _, _) = self.desired_view();
             (x, y)
         });
-        render::draw_pet(
-            &mut self.present_buf,
-            pw,
-            ph,
-            &self.pet,
-            ox,
-            oy,
-            &mut self.sprites,
-            scale,
+        let snapshot = RenderSnapshot::from(&self.pet);
+        let outcome = self.renderer.render(
+            &snapshot,
+            FrameViewport {
+                width: pw,
+                height: ph,
+                origin_x: ox,
+                origin_y: oy,
+                scale,
+            },
         );
+        if !force_present && !outcome.rasterized {
+            return;
+        }
+        let pixels = self.renderer.pixels();
 
         #[cfg(target_os = "macos")]
         {
-            macos::present_argb(&window, &self.present_buf, pw, ph);
+            macos::present_argb(&window, pixels, pw, ph);
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -253,8 +249,8 @@ impl App {
                 let _ = surface.resize(nw, nh);
             }
             if let Ok(mut buffer) = surface.buffer_mut() {
-                let n = buffer.len().min(self.present_buf.len());
-                buffer[..n].copy_from_slice(&self.present_buf[..n]);
+                let n = buffer.len().min(pixels.len());
+                buffer[..n].copy_from_slice(&pixels[..n]);
                 let _ = buffer.present();
             }
         }
@@ -366,23 +362,17 @@ impl App {
         }
     }
 
-    /// Tight body hit in desktop logical coords (props / transparent canvas ignored).
-    fn hits_pet_body(&self, desk_x: f64, desk_y: f64) -> bool {
-        self.hits_pet_body_scaled(desk_x, desk_y, 1.0)
-    }
-
     fn hits_pet_body_scaled(&self, desk_x: f64, desk_y: f64, scale: f64) -> bool {
-        let dx = desk_x - self.pet.x;
-        let dy = desk_y - self.pet.y;
-        // Ellipse ~ WebView 120×110 body (was sized for the old 160² sprite).
-        let rx = (39.0 + PET_HIT_PAD as f64) * scale;
-        let ry = (33.0 + PET_HIT_PAD as f64) * scale;
-        (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0
+        RenderSnapshot::from(&self.pet)
+            .pet_hit_mask(scale)
+            .contains_desktop(desk_x, desk_y)
     }
 
     fn hits_pet_local(&self, lx: f64, ly: f64) -> bool {
         let (wx, wy) = self.window_origin();
-        self.hits_pet_body(wx + lx, wy + ly)
+        RenderSnapshot::from(&self.pet)
+            .pet_hit_mask(1.0)
+            .contains_local(lx, ly, wx, wy)
     }
 
     fn window_origin(&self) -> (f64, f64) {
@@ -667,7 +657,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.sync_window_pos(false);
             self.update_passthrough();
             self.sync_flash_overlay(event_loop);
-            self.redraw();
+            self.redraw(false);
             self.next_frame = now + self.pet.mode.frame_interval();
         } else {
             // Refresh pet-ellipse ignore toggle between paints (pre-click capture).
@@ -731,7 +721,7 @@ impl ApplicationHandler<UserEvent> for App {
             eprintln!("cat-desk-pet: stress props (bird + laser)");
         }
         self.sync_window_pos(true);
-        self.redraw();
+        self.redraw(true);
         // Accessory (no Dock) — force above other windows so the pet is findable.
         #[cfg(target_os = "macos")]
         if let Some(w) = &self.window {
@@ -762,7 +752,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_pet_visible(false);
             }
             WindowEvent::RedrawRequested => {
-                self.redraw();
+                self.redraw(true);
                 self.update_passthrough();
             }
             // On macOS these fire only while ignore=false (cursor over pet ellipse
