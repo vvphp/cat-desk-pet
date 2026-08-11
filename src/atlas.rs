@@ -13,6 +13,7 @@ pub struct AtlasRegion {
     pub source_x: u32,
     pub source_y: u32,
     /// Semantic palette roles that this independently rasterized region may contain.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub allowed_roles: &'static [u8],
 }
 
