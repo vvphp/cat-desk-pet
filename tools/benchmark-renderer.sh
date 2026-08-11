@@ -15,7 +15,8 @@ Options:
   --binary PATH       Release binary used for the binary-size record
   -h, --help          Show this help
 
-The script writes samples.csv, summary.txt, and (on macOS) vmmap-summary.txt.
+The script writes interval CPU-time deltas to samples.csv, plus summary.txt and
+(on macOS) vmmap-summary.txt.
 Run each scenario at least three times and alternate backend order when comparing.
 EOF
 }
@@ -44,6 +45,33 @@ safe_label() {
     ''|*[!A-Za-z0-9._-]*) return 1 ;;
     *) return 0 ;;
   esac
+}
+
+process_sample() {
+  LC_ALL=C ps -p "$PID" -o time= -o rss= 2>/dev/null | awk '
+    NF >= 2 {
+      raw = $1
+      rss = $2
+      days = 0
+      day_parts = split(raw, with_days, "-")
+      if (day_parts == 2) {
+        days = with_days[1] + 0
+        raw = with_days[2]
+      }
+      count = split(raw, parts, ":")
+      seconds = parts[count] + 0
+      minutes = count >= 2 ? parts[count - 1] + 0 : 0
+      hours = count >= 3 ? parts[count - 2] + 0 : 0
+      total = days * 86400 + hours * 3600 + minutes * 60 + seconds
+      printf "%.2f,%s\n", total, rss
+      exit
+    }
+  '
+}
+
+monotonic_seconds() {
+  "$HIRES_PERL" -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+    'printf "%.9f\n", clock_gettime(CLOCK_MONOTONIC)'
 }
 
 metric() {
@@ -141,6 +169,8 @@ safe_label "$BACKEND" || die "--backend may contain only letters, numbers, dot, 
 is_positive_integer "$SECONDS_TO_SAMPLE" || die "--seconds must be a positive integer"
 is_non_negative_integer "$WARM_SECONDS" || die "--warm must be a non-negative integer"
 kill -0 "$PID" 2>/dev/null || die "process $PID is not running"
+HIRES_PERL="$(command -v perl || true)"
+[[ -n "$HIRES_PERL" ]] || die "perl Time::HiRes is required for interval timing"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 case "$OUT_DIR" in
@@ -156,7 +186,13 @@ mkdir -p "$RUN_DIR"
 SAMPLES="$RUN_DIR/samples.csv"
 CPU_SORTED="$RUN_DIR/.cpu-sorted"
 RSS_SORTED="$RUN_DIR/.rss-sorted"
-trap 'rm -f "$CPU_SORTED" "$RSS_SORTED"' EXIT HUP INT TERM
+cleanup_samples() {
+  rm -f "$CPU_SORTED" "$RSS_SORTED"
+}
+trap cleanup_samples EXIT
+trap 'cleanup_samples; exit 129' HUP
+trap 'cleanup_samples; exit 130' INT
+trap 'cleanup_samples; exit 143' TERM
 
 echo "sample,elapsed_s,cpu_percent,rss_kb" > "$SAMPLES"
 echo "warming process $PID for ${WARM_SECONDS}s ..."
@@ -165,17 +201,34 @@ if [[ "$WARM_SECONDS" -gt 0 ]]; then
 fi
 
 echo "sampling ${SCENARIO}/${BACKEND} for ${SECONDS_TO_SAMPLE}s ..."
+previous_row="$(process_sample)"
+[[ -n "$previous_row" ]] || die "process $PID exited before sampling"
+previous_cpu_seconds="${previous_row%%,*}"
+previous_wall_seconds="$(monotonic_seconds)"
 sample=1
 while [[ "$sample" -le "$SECONDS_TO_SAMPLE" ]]; do
-  if ! row="$(LC_ALL=C ps -p "$PID" -o %cpu= -o rss= 2>/dev/null | awk 'NF >= 2 { print $1 "," $2; exit }')"; then
-    die "could not sample process $PID with ps"
-  fi
+  sleep 1
+  row="$(process_sample)"
   [[ -n "$row" ]] || die "process $PID exited during sampling"
-  echo "$sample,$((sample - 1)),$row" >> "$SAMPLES"
+  wall_seconds="$(monotonic_seconds)"
+  cpu_seconds="${row%%,*}"
+  rss_kb="${row#*,}"
+  cpu_percent="$(awk \
+    -v current_cpu="$cpu_seconds" \
+    -v previous_cpu="$previous_cpu_seconds" \
+    -v current_wall="$wall_seconds" \
+    -v previous_wall="$previous_wall_seconds" '
+    BEGIN {
+      cpu_delta = current_cpu - previous_cpu
+      wall_delta = current_wall - previous_wall
+      if (cpu_delta < 0 || wall_delta <= 0) exit 1
+      printf "%.2f", cpu_delta / wall_delta * 100
+    }
+  ')" || die "invalid process CPU or monotonic time delta"
+  echo "$sample,$sample,$cpu_percent,$rss_kb" >> "$SAMPLES"
+  previous_cpu_seconds="$cpu_seconds"
+  previous_wall_seconds="$wall_seconds"
   sample=$((sample + 1))
-  if [[ "$sample" -le "$SECONDS_TO_SAMPLE" ]]; then
-    sleep 1
-  fi
 done
 
 CPU_AVG="$(metric "$SAMPLES" 3 avg)"
@@ -248,6 +301,7 @@ process_command=$PROCESS_COMMAND
 warm_seconds=$WARM_SECONDS
 sample_seconds=$SECONDS_TO_SAMPLE
 sample_count=$SECONDS_TO_SAMPLE
+cpu_sample_method=process_cputime_delta_over_monotonic_interval
 cpu_avg_percent=$CPU_AVG
 cpu_min_percent=$CPU_MIN
 cpu_max_percent=$CPU_MAX
