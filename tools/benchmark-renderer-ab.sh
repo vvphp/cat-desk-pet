@@ -117,6 +117,10 @@ run_one() {
     --out-dir "$OUT_DIR" \
     --binary "$binary"
   stop_app
+  if [[ "$backend" = "wgpu-atlas" ]] && grep -q 'native-upload-fallback' "$app_log"; then
+    echo "wgpu direct-path violation; invalidating run: $app_log" >&2
+    exit 1
+  fi
 }
 
 for scenario in sleeping idle walking stress-props; do

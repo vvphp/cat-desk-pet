@@ -361,6 +361,15 @@ impl App {
             self.last_passthrough = now;
 
             let Some(window) = &self.window else { return };
+            // Forced CLI scenes are benchmark fixtures. Keep them click-through
+            // so incidental pointer activity cannot clear the forced state.
+            if self.pet.force_scene.is_some() {
+                if !self.ignore_mouse {
+                    self.ignore_mouse = true;
+                    macos::set_ignore_mouse(window, true);
+                }
+                return;
+            }
             // While holding, keep capture so drag/release stay on this window.
             if holding {
                 if self.ignore_mouse {
@@ -763,8 +772,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         self.window = Some(window);
         if self.stress_props {
-            self.pet.spawn_bird_flyby();
-            self.pet.spawn_toy(ToyKind::Laser);
+            self.pet.force_stress_scene();
             self.stress_props = false;
             eprintln!("cat-desk-pet: stress props (bird + laser)");
         }

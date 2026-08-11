@@ -878,6 +878,14 @@ impl Pet {
         }
     }
 
+    /// Deterministic bird + laser workload used by renderer A/B benchmarks.
+    pub fn force_stress_scene(&mut self) {
+        self.spawn_bird_flyby();
+        self.spawn_toy(ToyKind::Laser);
+        self.force_scene = Some(ForceScene::Walking);
+        self.mode = Mode::Walking;
+    }
+
     pub fn spawn_nose_butterfly(&mut self) {
         if self.flyer.is_some() {
             return;
@@ -1144,6 +1152,7 @@ impl Pet {
         if let Some(scene) = self.force_scene {
             self.update_forced(scene, dt);
             self.phys_flyer(dt);
+            self.phys_toy(dt);
             return;
         }
 

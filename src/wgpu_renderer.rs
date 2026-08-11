@@ -653,16 +653,14 @@ impl Renderer for WgpuRenderer {
                 rasterized: false,
             };
         }
-        self.direct_frame = supports_direct(snapshot);
+        let direct_blocker = direct_blocker(snapshot);
+        self.direct_frame = direct_blocker.is_none();
         if self.reported_direct != Some(self.direct_frame) {
-            eprintln!(
-                "cat-desk-pet: wgpu path={}",
-                if self.direct_frame {
-                    "atlas-direct"
-                } else {
-                    "native-upload-fallback"
-                }
-            );
+            if let Some(blocker) = direct_blocker {
+                eprintln!("cat-desk-pet: wgpu path=native-upload-fallback reason={blocker}");
+            } else {
+                eprintln!("cat-desk-pet: wgpu path=atlas-direct");
+            }
             self.reported_direct = Some(self.direct_frame);
         }
         let view = ViewUniform {
@@ -733,15 +731,34 @@ impl Renderer for WgpuRenderer {
     }
 }
 
+#[cfg(test)]
 fn supports_direct(snapshot: &RenderSnapshot<'_>) -> bool {
-    snapshot.feed.is_none()
-        && snapshot.gift.is_none()
-        && snapshot.bubble.is_none()
-        && snapshot.particles.is_empty()
-        && snapshot.toy.is_none_or(|toy| toy.kind == ToyKind::Laser)
-        && snapshot
-            .flyer
-            .is_none_or(|flyer| flyer.kind == FlyerKind::Bird)
+    direct_blocker(snapshot).is_none()
+}
+
+fn direct_blocker(snapshot: &RenderSnapshot<'_>) -> Option<&'static str> {
+    if snapshot.feed.is_some() {
+        return Some("feed");
+    }
+    if snapshot.gift.is_some() {
+        return Some("gift");
+    }
+    if snapshot.bubble.is_some() {
+        return Some("bubble");
+    }
+    if !snapshot.particles.is_empty() {
+        return Some("particles");
+    }
+    if snapshot.toy.is_some_and(|toy| toy.kind != ToyKind::Laser) {
+        return Some("toy");
+    }
+    if snapshot
+        .flyer
+        .is_some_and(|flyer| flyer.kind != FlyerKind::Bird)
+    {
+        return Some("flyer");
+    }
+    None
 }
 
 fn atlas_instances(snapshot: &RenderSnapshot<'_>, viewport: FrameViewport) -> Vec<AtlasInstance> {
@@ -1227,6 +1244,16 @@ mod tests {
         pet.spawn_bird_flyby();
         pet.spawn_toy(ToyKind::Laser);
         assert!(supports_direct(&RenderSnapshot::from(&pet)));
+    }
+
+    #[test]
+    fn forced_stress_scene_stays_on_the_direct_path() {
+        let mut pet = Pet::new(1440.0, 900.0);
+        pet.force_stress_scene();
+        for _ in 0..600 {
+            pet.update(1.0 / 30.0);
+            assert!(supports_direct(&RenderSnapshot::from(&pet)));
+        }
     }
 
     #[test]
