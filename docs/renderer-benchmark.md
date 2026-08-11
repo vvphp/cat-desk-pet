@@ -165,35 +165,33 @@ Decision: **No-Go for making wgpu the default.** See [`renderer-decision.md`](re
 
 ### Environment and method
 
-- Frozen binaries: commit `5b3ea60`, clean when built, with workload `forced-v2`.
-- Native SHA-256: `cf3cbc7e5988c7efa472fbc148a49686a8318ef8fa8b582f263ba62c13261ab4`.
-- wgpu SHA-256: `68c99b314689e985e112ce7c327255e0e8b038ecc726ae21da0fd0c05a865fd8`.
+- Frozen binaries: renderer source at commit `1c2b678`, clean when built, with workload `forced-v2`; the later commit only updates this report.
+- Native SHA-256: `44c872cc45079edfa293550d787ed3f80079bf2675e27ef5278892029bb89929`.
+- wgpu SHA-256: `9b6e5ae035b231dc1054aa17072b556dd0526b5d47a70cae4f88420aec349a4c`.
 - macOS 26.5.1, Apple M5, arm64, 16 GiB RAM.
 - DELL S2722DC, 2560 x 1440 at 75 Hz, 1x application scale.
 - AC power, Low Power Mode off.
-- Release profile with LTO; 10-second warm-up and 60 one-second samples. Sleeping and idle used three alternating rounds per backend; walking used one exploratory matched pair.
+- Release profile with LTO; 10-second warm-up and 60 one-second samples. Sleeping and idle used three alternating rounds per backend.
+- CPU is calculated from nanosecond `proc_pid_rusage` deltas divided by monotonic wall-time deltas. It does not use the historical/decaying `ps %cpu` value. A 100% CPU probe measured 99.70%-99.80% before this run.
 - Metal adapter requested with `LowPower`; Surface selected `Bgra8UnormSrgb` and `PostMultiplied` alpha.
-- sleeping and the completed walking pair stayed on `atlas-direct`. Idle entered the documented native-upload fallback for the fixed Yawn bubble and is labelled `wgpu-hybrid`.
-- sleeping and idle completed three alternating rounds per backend. The run was stopped after the first complete walking pair to limit test time; one unpaired wgpu sample was discarded, and stress-props was not rerun. Walking is exploratory and neither walking nor stress is used as acceptance evidence.
+- sleeping stayed on `atlas-direct`. Idle entered the documented native-upload fallback for the fixed Yawn bubble and is labelled `wgpu-hybrid`.
+- Walking and stress-props were not rerun after the CPU sampler correction and are not used as acceptance evidence.
 
-For sleeping and idle, the table reports the median of the three round-level values, not a pooled average. Walking reports its single matched pair:
+The table reports the median of the three round-level values, not a pooled average:
 
 | Scenario | Backend | CPU median | CPU p95 | RSS median | RSS peak | Footprint peak | Binary size |
 |---|---|---:|---:|---:|---:|---:|---:|
-| sleeping | native | 0.60% | 1.10% | 70.9 MiB | 71.2 MiB | 14.0 MiB | 2.40 MiB |
-| sleeping | wgpu-atlas | 0.80% | 1.30% | 74.5 MiB | 79.9 MiB | 90.3 MiB | 5.41 MiB |
-| idle | native | 0.50% | 1.90% | 64.8 MiB | 72.3 MiB | 15.4 MiB | 2.40 MiB |
-| idle | wgpu-hybrid | 1.20% | 1.90% | 73.5 MiB | 76.5 MiB | 90.8 MiB | 5.41 MiB |
-| walking (one pair) | native | 2.25% | 2.80% | 47.9 MiB | 65.3 MiB | 15.4 MiB | 2.40 MiB |
-| walking (one pair) | wgpu-atlas | 2.70% | 3.60% | 32.7 MiB | 72.4 MiB | 89.7 MiB | 5.41 MiB |
+| sleeping | native | 0.72% | 1.10% | 71.2 MiB | 71.3 MiB | 14.1 MiB | 2.40 MiB |
+| sleeping | wgpu-atlas | 1.08% | 1.47% | 74.0 MiB | 79.9 MiB | 90.1 MiB | 5.41 MiB |
+| idle | native | 0.94% | 1.31% | 72.8 MiB | 72.9 MiB | 15.6 MiB | 2.40 MiB |
+| idle | wgpu-hybrid | 2.00% | 2.88% | 81.6 MiB | 81.8 MiB | 91.0 MiB | 5.41 MiB |
 
 ### Gate interpretation
 
-- Pass: sleeping CPU regressed by 0.20 percentage points, within the 0.5-point limit.
-- Fail: fixed idle CPU regressed by 0.70 percentage points and required the hybrid fallback; the limit is 0.5.
+- Pass: sleeping CPU regressed by 0.36 percentage points, within the 0.5-point limit.
+- Fail: fixed idle CPU regressed by 1.06 percentage points and required the hybrid fallback; the limit is 0.5.
 - Trade-off: sleeping and idle wgpu footprint peaks were about 90 MiB, roughly six times native. They remain below the 100 MiB absolute limit but are not justified by the measured CPU result.
-- Exploratory only: the single walking pair was 2.25% native versus 2.70% wgpu-atlas. It is not a three-round result.
 - Pass: binary delta was 3,163,776 bytes (3.02 MiB), within the 10 MiB limit.
-- Not completed: replayable stress-props, whole-system energy/GPU, cold-start distribution, and real Windows D3D12 acceptance. These cannot turn the current result into a Go because the mandatory idle CPU gate already failed.
+- Not completed: corrected-sampler walking/stress-props, whole-system energy/GPU, cold-start distribution, and real Windows D3D12 acceptance. These cannot turn the current result into a Go because the mandatory idle CPU gate already failed.
 
-The ignored local result root `benchmark-results/ab-20260811-165009` retains the 1 Hz samples and `vmmap` output. It is not committed; the checked-in CSV contains only complete, matched evidence. Earlier rows from random workloads were replaced rather than mixed with `forced-v2`.
+The ignored local result root `benchmark-results/ab-20260811-174401` retains the 1 Hz samples and `vmmap` output. It is not committed; the checked-in CSV contains only complete, matched evidence. Rows from the old `ps %cpu` sampler and uncorrected workloads were removed rather than mixed with this evidence.
