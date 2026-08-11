@@ -82,7 +82,7 @@ Run the wrapper from a real terminal. It verifies the reported renderer path bef
 
 Results are written under the ignored `benchmark-results/` directory:
 
-- `samples.csv`: raw 1 Hz `%CPU` and RSS samples.
+- `samples.csv`: raw 1 Hz process CPU-time deltas and RSS samples. CPU percent is `100 * process CPU-time delta / monotonic wall-time delta`; it does not reuse `ps %cpu` history.
 - `summary.txt`: commit/environment metadata plus average, minimum, maximum, median, and nearest-rank p95 values.
 - `vmmap-summary.txt`: macOS physical-footprint evidence when `vmmap` is available.
 

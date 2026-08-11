@@ -12,6 +12,8 @@ pub struct AtlasRegion {
     /// Crop origin in 3x source pixels.
     pub source_x: u32,
     pub source_y: u32,
+    /// Semantic palette roles that this independently rasterized region may contain.
+    pub allowed_roles: &'static [u8],
 }
 
 #[allow(dead_code)] // ATLAS_HEIGHT is only used by tests and the optional GPU backend.
@@ -278,6 +280,24 @@ mod tests {
                 "y bounds {}",
                 region.name
             );
+            assert!(!region.allowed_roles.is_empty(), "roles {}", region.name);
+            for &role in region.allowed_roles {
+                assert!((1..=19).contains(&role), "role {role} in {}", region.name);
+            }
+            for y in 0..region.height {
+                for x in 0..region.width {
+                    let index = (((region.y + y) * ATLAS_WIDTH + region.x + x) * 2) as usize;
+                    let role = PIXELS[index];
+                    let coverage = PIXELS[index + 1];
+                    if coverage != 0 {
+                        assert!(
+                            region.allowed_roles.contains(&role),
+                            "illegal role {role} in {} at ({x}, {y})",
+                            region.name
+                        );
+                    }
+                }
+            }
         }
         for (index, left) in generated::REGIONS.iter().enumerate() {
             for right in &generated::REGIONS[index + 1..] {
@@ -295,5 +315,11 @@ mod tests {
         assert_eq!(role_color(CoatColor::Orange, 1), [0xF4, 0xA5, 0x6B, 255]);
         assert_eq!(role_color(CoatColor::Pink, 7)[3], 0);
         assert_eq!(role_color(CoatColor::Tuxedo, 6), [0xFF, 0xD2, 0x3B, 255]);
+    }
+
+    #[test]
+    fn eye_normal_is_limited_to_eye_and_white_roles() {
+        let eye = region("eye-normal").expect("eye-normal region");
+        assert_eq!(eye.allowed_roles, &[6, 11]);
     }
 }
