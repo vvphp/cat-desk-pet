@@ -75,7 +75,7 @@ tools/benchmark-renderer-ab.sh \
   /tmp/cat-desk-pet-wgpu
 ```
 
-The wrapper launches each AppKit process inside a PTY, verifies the reported renderer path before sampling, and stops only the exact child process it created.
+Run the wrapper from a real terminal. It verifies the reported renderer path before sampling and stops only the exact child process it created.
 
 Results are written under the ignored `benchmark-results/` directory:
 

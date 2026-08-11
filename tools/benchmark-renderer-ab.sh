@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the issue #6 native/wgpu matrix on macOS with an AppKit-capable PTY.
+# Run the issue #6 native/wgpu matrix on macOS from an AppKit-capable terminal.
 set -euo pipefail
 
 usage() {
@@ -35,7 +35,6 @@ mkdir -p "$OUT_DIR"
 ORDER_FILE="$OUT_DIR/round-order.txt"
 
 APP_PID=""
-SCRIPT_PID=""
 
 stop_app() {
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
@@ -46,14 +45,10 @@ stop_app() {
       wait_count=$((wait_count + 1))
     done
   fi
-  if [[ -n "$SCRIPT_PID" ]] && kill -0 "$SCRIPT_PID" 2>/dev/null; then
-    kill -TERM "$SCRIPT_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$SCRIPT_PID" ]]; then
-    wait "$SCRIPT_PID" 2>/dev/null || true
+  if [[ -n "$APP_PID" ]]; then
+    wait "$APP_PID" 2>/dev/null || true
   fi
   APP_PID=""
-  SCRIPT_PID=""
 }
 trap stop_app EXIT HUP INT TERM
 
@@ -78,25 +73,12 @@ run_one() {
   fi
 
   app_log="$OUT_DIR/app-${scenario}-${backend}-r${round}.log"
-  script_stdout="$OUT_DIR/script-${scenario}-${backend}-r${round}.log"
   printf '%s round=%s scenario=%s backend=%s\n' "$(date '+%F %T')" "$round" "$scenario" "$backend" | tee -a "$ORDER_FILE"
 
-  # AppKit/winit requires a foreground-like terminal in this environment.
-  # `script` supplies the PTY while the sampler runs in this parent process.
-  script -Fq "$app_log" "$binary" --renderer "$renderer" --mode "$mode" $extra </dev/null >"$script_stdout" 2>&1 &
-  SCRIPT_PID=$!
-
-  attempt=0
-  while [[ "$attempt" -lt 50 ]]; do
-    APP_PID="$(pgrep -P "$SCRIPT_PID" | awk 'NR == 1 { print; exit }')"
-    if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
-      break
-    fi
-    APP_PID=""
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  [[ -n "$APP_PID" ]] || { echo "app failed to start; see $app_log" >&2; exit 1; }
+  # AppKit/winit needs the caller to run this wrapper from a real terminal.
+  # The child inherits that terminal; its output is captured independently.
+  "$binary" --renderer "$renderer" --mode "$mode" $extra >"$app_log" 2>&1 &
+  APP_PID=$!
 
   attempt=0
   while [[ "$attempt" -lt 50 ]] && ! grep -q "$expected" "$app_log" 2>/dev/null; do
