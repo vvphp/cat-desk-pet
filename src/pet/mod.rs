@@ -625,6 +625,12 @@ impl Pet {
     }
 
     pub fn note_cursor(&mut self, pos: Option<(f64, f64)>) {
+        if self.force_scene.is_some() {
+            self.cursor = None;
+            self.cursor_trail.clear();
+            self.cursor_move_amt = 0.0;
+            return;
+        }
         self.cursor = pos;
         let Some((x, y)) = pos else {
             self.prune_cursor_trail();
@@ -876,6 +882,64 @@ impl Pet {
             self.mode_elapsed = 0.0;
             self.mode_until = 4.0;
         }
+    }
+
+    pub fn force_benchmark_scene(&mut self, scene: ForceScene) {
+        self.force_scene = Some(scene);
+        self.mode = match scene {
+            ForceScene::Walking => Mode::Walking,
+            ForceScene::Idle => Mode::Idle,
+            ForceScene::Sleeping => Mode::Sleeping,
+        };
+        self.cursor = None;
+        self.cursor_trail.clear();
+        self.cursor_move_amt = 0.0;
+        self.feed = None;
+        self.toy = None;
+        self.flyer = None;
+        self.gift = None;
+        self.laser_trail.clear();
+        self.bubble = None;
+        self.particles.clear();
+        self.pick_forced_target();
+        if scene == ForceScene::Idle {
+            self.begin_forced_idle_action(IdleAction::Sit);
+        }
+    }
+
+    /// Deterministic bird + laser workload used by renderer A/B benchmarks.
+    pub fn force_stress_scene(&mut self) {
+        self.force_benchmark_scene(ForceScene::Walking);
+        self.spawn_forced_bird();
+        let laser_x = self.x + 80.0;
+        let laser_y = self.floor_y - 30.0;
+        self.toy = Some(Toy {
+            kind: ToyKind::Laser,
+            x: laser_x,
+            y: laser_y,
+            vx: 0.0,
+            vy: 0.0,
+            hits: 0,
+            age: 0.0,
+            swat_t: 0.0,
+            spin: 0.0,
+            rat_x: laser_x,
+            rat_y: laser_y,
+            rat_next: 0.0,
+        });
+    }
+
+    fn spawn_forced_bird(&mut self) {
+        self.flyer = Some(Flyer {
+            kind: FlyerKind::Bird,
+            phase: FlyerPhase::FlyBy,
+            x: self.x - 90.0,
+            y: self.floor_y - 40.0,
+            vx: 160.0,
+            age: 0.0,
+            land_t: 0.0,
+            nose: false,
+        });
     }
 
     pub fn spawn_nose_butterfly(&mut self) {
@@ -1144,6 +1208,13 @@ impl Pet {
         if let Some(scene) = self.force_scene {
             self.update_forced(scene, dt);
             self.phys_flyer(dt);
+            self.phys_toy(dt);
+            if scene == ForceScene::Walking
+                && self.toy.as_ref().is_some_and(|toy| toy.kind == ToyKind::Laser)
+                && self.flyer.is_none()
+            {
+                self.spawn_forced_bird();
+            }
             return;
         }
 
@@ -1855,9 +1926,17 @@ impl Pet {
         };
 
         if kind.is_cursor_driven() {
-            let cursor = self.cursor;
             let clock = self.clock;
             let is_laser = kind == ToyKind::Laser;
+            let cursor = if self.force_scene.is_some() && is_laser {
+                let phase = clock * 1.7;
+                Some((
+                    self.x + phase.cos() * 70.0,
+                    self.floor_y - 38.0 + (phase * 1.3).sin() * 28.0,
+                ))
+            } else {
+                self.cursor
+            };
             if let Some(t) = self.toy.as_mut() {
                 t.age += dt;
                 if let Some((cx, cy)) = cursor {
@@ -2018,7 +2097,7 @@ impl Pet {
                 self.x += dir * speed * dt;
                 self.y = self.floor_y + self.walk_phase.sin() * 3.0;
                 if (self.x - self.target_x).abs() < 4.0 {
-                    self.pick_new_target();
+                    self.pick_forced_target();
                 }
             }
             ForceScene::Idle => {
@@ -2026,7 +2105,16 @@ impl Pet {
                 self.idle_t += dt;
                 self.idle_action_t += dt;
                 if self.idle_action_t >= self.idle_action.duration() {
-                    self.pick_idle_action();
+                    let next = match self.idle_action {
+                        IdleAction::Sit => IdleAction::Yawn,
+                        IdleAction::Yawn => IdleAction::Stretch,
+                        IdleAction::Stretch => IdleAction::Look,
+                        IdleAction::Look => IdleAction::TailCurl,
+                        IdleAction::TailCurl
+                        | IdleAction::MudRoll
+                        | IdleAction::BackScratch => IdleAction::Sit,
+                    };
+                    self.begin_forced_idle_action(next);
                 }
                 if self.idle_action == IdleAction::Look
                     && !self.look_flipped
@@ -2250,6 +2338,22 @@ impl Pet {
         }
     }
 
+    fn begin_forced_idle_action(&mut self, action: IdleAction) {
+        self.idle_action = action;
+        self.idle_action_t = 0.0;
+        self.look_flipped = false;
+        if let Some(text) = bubble::idle_start_bubble(action, self.species) {
+            self.show_bubble(text, 1.4);
+        }
+    }
+
+    fn pick_forced_target(&mut self) {
+        let lo = Self::SIZE;
+        let hi = (self.screen_w - Self::SIZE).max(lo + 1.0);
+        self.target_x = if self.x < (lo + hi) * 0.5 { hi } else { lo };
+        self.target_y = self.floor_y;
+    }
+
     fn pick_new_target(&mut self) {
         let margin = Self::SIZE;
         let lo = margin;
@@ -2387,6 +2491,78 @@ mod tests {
                 pet.target_x,
                 pet.x
             );
+        }
+    }
+
+    #[test]
+    fn forced_idle_sequence_is_replayable() {
+        let mut first = Pet::new(1440.0, 900.0);
+        let mut second = Pet::new(1440.0, 900.0);
+        first.force_benchmark_scene(ForceScene::Idle);
+        second.force_benchmark_scene(ForceScene::Idle);
+        let mut saw_bubble = false;
+
+        for step in 0..1_200 {
+            first.note_cursor(Some((step as f64, 120.0)));
+            second.note_cursor(Some((1200.0 - step as f64, 780.0)));
+            first.update(1.0 / 60.0);
+            let _ = fastrand_u64();
+            second.update(1.0 / 60.0);
+
+            assert_eq!(first.idle_action, second.idle_action);
+            assert_eq!(first.idle_action_t, second.idle_action_t);
+            assert_eq!(first.facing, second.facing);
+            assert_eq!(first.y, second.y);
+            assert_eq!(first.particles.len(), second.particles.len());
+            assert_eq!(
+                first.bubble.as_ref().map(|bubble| bubble.text.as_str()),
+                second.bubble.as_ref().map(|bubble| bubble.text.as_str())
+            );
+            saw_bubble |= first.bubble.is_some();
+        }
+
+        assert!(saw_bubble, "fixed idle replay should exercise bubble fallback");
+        assert!(first.cursor.is_none());
+        assert!(second.cursor.is_none());
+    }
+
+    #[test]
+    fn forced_stress_ignores_cursor_and_replays_fixed_props() {
+        let mut first = Pet::new(1440.0, 900.0);
+        let mut second = Pet::new(1440.0, 900.0);
+        first.force_stress_scene();
+        second.force_stress_scene();
+        assert_eq!(first.flyer.as_ref().map(|flyer| flyer.vx), Some(160.0));
+        assert_eq!(second.flyer.as_ref().map(|flyer| flyer.vx), Some(160.0));
+
+        for step in 0..1_200 {
+            first.note_cursor(Some((step as f64, 50.0)));
+            second.note_cursor(Some((1400.0 - step as f64, 850.0)));
+            first.update(1.0 / 60.0);
+            let _ = fastrand_u64();
+            second.update(1.0 / 60.0);
+
+            assert_eq!(first.cursor, None);
+            assert_eq!(second.cursor, None);
+            assert_eq!(first.x, second.x);
+            assert_eq!(first.y, second.y);
+            assert_eq!(first.target_x, second.target_x);
+            assert_eq!(first.visible_bounds(), second.visible_bounds());
+            let first_bird = first.flyer.as_ref().expect("forced bird");
+            let second_bird = second.flyer.as_ref().expect("forced bird");
+            assert_eq!(first_bird.x, second_bird.x);
+            assert_eq!(first_bird.y, second_bird.y);
+            assert_eq!(first_bird.vx, second_bird.vx);
+            let first_laser = first.toy.as_ref().expect("forced laser");
+            let second_laser = second.toy.as_ref().expect("forced laser");
+            assert_eq!(first_laser.x, second_laser.x);
+            assert_eq!(first_laser.y, second_laser.y);
+            assert_eq!(first.laser_trail.len(), second.laser_trail.len());
+            for (left, right) in first.laser_trail.iter().zip(&second.laser_trail) {
+                assert_eq!(left.x, right.x);
+                assert_eq!(left.y, right.y);
+                assert_eq!(left.t, right.t);
+            }
         }
     }
 

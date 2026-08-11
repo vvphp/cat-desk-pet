@@ -26,7 +26,7 @@ mod generated {
     ));
 }
 
-#[allow(unused_imports)] // Phase 3 uploads the full texture.
+#[cfg(any(test, feature = "renderer-wgpu"))]
 pub use generated::ATLAS_HEIGHT;
 pub use generated::{ATLAS_SCALE, ATLAS_WIDTH};
 
@@ -36,7 +36,7 @@ const PIXELS: &[u8] = include_bytes!(concat!(
 ));
 
 /// Raw indexed pixels are consumed directly by the Phase 3 GPU backend.
-#[allow(dead_code)]
+#[cfg(feature = "renderer-wgpu")]
 pub fn pixels() -> &'static [u8] {
     PIXELS
 }
@@ -239,6 +239,15 @@ pub fn role_color(coat: CoatColor, role: u8) -> [u8; 4] {
         19 => rgba(0xC2546F),
         _ => transparent(),
     }
+}
+
+#[cfg(feature = "renderer-wgpu")]
+pub fn palette_texture(coat: CoatColor) -> [[u8; 4]; 32] {
+    let mut colors = [[0; 4]; 32];
+    for (role, color) in colors.iter_mut().enumerate().skip(1) {
+        *color = role_color(coat, role as u8);
+    }
+    colors
 }
 
 #[cfg(test)]

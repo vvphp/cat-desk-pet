@@ -64,23 +64,7 @@ pub fn draw_pet(
             draw_bed(buf, w, h, bx, by + 18.0);
         }
 
-        let bob = match pet.mode {
-            Mode::Walking
-            | Mode::GoingHome
-            | Mode::Clingy
-            | Mode::Interested
-            | Mode::Chasing
-            | Mode::Playing
-            | Mode::Trick => pet.walk_phase.sin() * 3.0,
-            Mode::Idle => (pet.idle_t * 1.6).sin() * 1.5,
-            Mode::Pet => 0.0, // bob applied in pet tick via y
-            Mode::Sleeping | Mode::InBed => (pet.sleep_t * 0.8).sin() * 0.8 + 6.0,
-            Mode::Dragged => -8.0,
-            Mode::Dizzy => (pet.dizzy_t * 20.0).sin() * 2.0,
-            Mode::Feeding if pet.eat_anim_t > 0.0 => (pet.eat_anim_t * 14.0).sin() * 2.0,
-            Mode::Gifting => (pet.walk_phase).sin() * 1.2,
-            _ => 0.0,
-        };
+        let bob = sprite::bob(pet);
 
         let sprite = sprites.pixels_for(pet, s);
         if !sprite.is_empty() {

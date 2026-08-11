@@ -1,0 +1,13 @@
+workload,cpu_sample_method,scenario,backend,round,cpu_median_percent,cpu_p95_percent,rss_median_kb,rss_peak_kb,physical_footprint_peak,binary_size_bytes
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,sleeping,native,1,0.47,0.75,75344,75408,14.4M,2513008
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,sleeping,wgpu-atlas,1,0.64,1.35,75728,81776,90.0M,5676784
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,sleeping,wgpu-atlas,2,1.18,1.49,81776,81792,90.1M,5676784
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,sleeping,native,2,0.72,1.10,72912,72960,14.1M,2513008
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,sleeping,native,3,0.82,1.10,72656,72912,14.1M,2513008
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,sleeping,wgpu-atlas,3,1.08,1.47,74320,81920,90.1M,5676784
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,idle,native,1,1.49,2.40,74560,74608,15.5M,2513008
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,idle,wgpu-hybrid,1,2.40,3.50,85992,87360,91.3M,5676784
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,idle,wgpu-hybrid,2,2.00,2.88,82160,82512,91.0M,5676784
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,idle,native,2,0.94,1.31,74576,74640,15.6M,2513008
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,idle,native,3,0.90,1.17,72480,74592,15.6M,2513008
+forced-v2,proc_pid_rusage_delta_over_monotonic_interval,idle,wgpu-hybrid,3,1.79,2.78,83552,83728,90.5M,5676784

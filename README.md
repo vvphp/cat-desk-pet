@@ -39,6 +39,9 @@ cd cat-desk-pet
 cargo run --release          # 或 npm run dev
 ./tools/run-pet.sh           # 后台脱离终端
 ./tools/package-macos.sh     # → dist/macos/摸鱼猫.app + .dmg
+
+# 实验性 wgpu A/B（不改变默认 native 后端）
+cargo run --release --features renderer-wgpu -- --renderer wgpu --mode walking
 ```
 
 打 tag 发版：`git tag v1.0.0 && git push origin v1.0.0`（见 `.github/workflows/release.yml`）。
@@ -60,6 +63,7 @@ cargo run --release          # 或 npm run dev
 
 - macOS：自管 CALayer 透明提交（绕过 softbuffer 丢 alpha）
 - 普通运行不解析 SVG；显式资产编译命令见 [`docs/renderer-assets.md`](docs/renderer-assets.md)
+- 可切换的 wgpu 实验后端、直绘/回退边界见 [`docs/renderer-wgpu.md`](docs/renderer-wgpu.md)
 - 姿态缓存 LRU 限流，避免走路把内存撑爆
 - CPU / Phase 记录见 [`docs/perf.md`](docs/perf.md)
 

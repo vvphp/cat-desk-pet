@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = []
 asset-compiler = ["dep:resvg"]
+renderer-wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
 
 [[bin]]
 name = "asset-compiler"
@@ -24,6 +25,14 @@ tray-icon = "0.19"
 raw-window-handle = "0.6"
 resvg = { version = "0.44", optional = true }
 fontdue = "0.9"
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "30.0.0", default-features = false, features = [
+  "std",
+  "wgsl",
+  "metal",
+  "dx12",
+], optional = true }
 
 # softbuffer ignores alpha on macOS (NoneSkipFirst) — we present via CALayer there.
 [target.'cfg(not(target_os = "macos"))'.dependencies]

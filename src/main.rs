@@ -12,13 +12,15 @@ mod render;
 mod renderer;
 mod sprite;
 mod text;
+#[cfg(feature = "renderer-wgpu")]
+mod wgpu_renderer;
 
 #[cfg(target_os = "macos")]
 mod macos;
 
 #[cfg(not(target_os = "macos"))]
 use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pet::{CoatColor, ForceScene, Mode, Pet, Species, ToyKind};
@@ -36,6 +38,12 @@ use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RendererPreference {
+    Native,
+    Wgpu,
+}
 
 #[derive(Debug)]
 enum UserEvent {
@@ -71,16 +79,20 @@ struct PressState {
 }
 
 struct App {
-    window: Option<Rc<Window>>,
+    window: Option<Arc<Window>>,
     /// Monitor-sized white overlay for photo flash (WebView `#flash`).
     #[cfg(target_os = "macos")]
-    flash_window: Option<Rc<Window>>,
+    flash_window: Option<Arc<Window>>,
     #[cfg(not(target_os = "macos"))]
-    context: Option<Context<Rc<Window>>>,
+    context: Option<Context<Arc<Window>>>,
     #[cfg(not(target_os = "macos"))]
-    surface: Option<Surface<Rc<Window>, Rc<Window>>>,
+    surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     pet: Pet,
     renderer: NativeRenderer,
+    #[cfg(feature = "renderer-wgpu")]
+    wgpu_renderer: Option<wgpu_renderer::WgpuRenderer>,
+    #[cfg(feature = "renderer-wgpu")]
+    renderer_preference: RendererPreference,
     last_tick: Instant,
     next_frame: Instant,
     _tray: Option<tray_icon::TrayIcon>,
@@ -114,7 +126,9 @@ const WIN_MOVE_MIN_INTERVAL: Duration = Duration::from_millis(80);
 /// Ignore sub-threshold view size jitter from ceil/round while props move.
 const VIEW_SIZE_THRESHOLD: u32 = 8;
 impl App {
-    fn new(screen_w: f64, screen_h: f64) -> Self {
+    fn new(screen_w: f64, screen_h: f64, renderer_preference: RendererPreference) -> Self {
+        #[cfg(not(feature = "renderer-wgpu"))]
+        let _ = renderer_preference;
         let now = Instant::now();
         Self {
             window: None,
@@ -126,6 +140,10 @@ impl App {
             surface: None,
             pet: Pet::new(screen_w, screen_h),
             renderer: NativeRenderer::new(),
+            #[cfg(feature = "renderer-wgpu")]
+            wgpu_renderer: None,
+            #[cfg(feature = "renderer-wgpu")]
+            renderer_preference,
             last_tick: now,
             next_frame: now,
             _tray: None,
@@ -221,16 +239,26 @@ impl App {
             (x, y)
         });
         let snapshot = RenderSnapshot::from(&self.pet);
-        let outcome = self.renderer.render(
-            &snapshot,
-            FrameViewport {
-                width: pw,
-                height: ph,
-                origin_x: ox,
-                origin_y: oy,
-                scale,
-            },
-        );
+        let viewport = FrameViewport {
+            width: pw,
+            height: ph,
+            origin_x: ox,
+            origin_y: oy,
+            scale,
+        };
+        #[cfg(feature = "renderer-wgpu")]
+        if let Some(renderer) = &mut self.wgpu_renderer {
+            let outcome = renderer.render(&snapshot, viewport);
+            if !force_present && !outcome.rasterized {
+                return;
+            }
+            if let Err(error) = renderer.present(viewport) {
+                eprintln!("cat-desk-pet: wgpu present failed: {error}");
+            }
+            return;
+        }
+
+        let outcome = self.renderer.render(&snapshot, viewport);
         if !force_present && !outcome.rasterized {
             return;
         }
@@ -333,6 +361,15 @@ impl App {
             self.last_passthrough = now;
 
             let Some(window) = &self.window else { return };
+            // Forced CLI scenes are benchmark fixtures. Keep them click-through
+            // so incidental pointer activity cannot clear the forced state.
+            if self.pet.force_scene.is_some() {
+                if !self.ignore_mouse {
+                    self.ignore_mouse = true;
+                    macos::set_ignore_mouse(window, true);
+                }
+                return;
+            }
             // While holding, keep capture so drag/release stay on this window.
             if holding {
                 if self.ignore_mouse {
@@ -453,7 +490,7 @@ impl App {
                 .with_position(PhysicalPosition::new(pos.x, pos.y));
             match event_loop.create_window(attrs) {
                 Ok(w) => {
-                    let w = Rc::new(w);
+                    let w = Arc::new(w);
                     macos::configure_flash_overlay(&w);
                     self.flash_window = Some(w);
                 }
@@ -696,7 +733,7 @@ impl ApplicationHandler<UserEvent> for App {
             .with_window_level(WindowLevel::AlwaysOnTop)
             .with_visible(true);
 
-        let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.scale = window.scale_factor();
 
         #[cfg(target_os = "macos")]
@@ -706,18 +743,36 @@ impl ApplicationHandler<UserEvent> for App {
             self.ignore_mouse = true;
         }
 
+        #[cfg(feature = "renderer-wgpu")]
+        if self.renderer_preference == RendererPreference::Wgpu {
+            match wgpu_renderer::WgpuRenderer::new(window.clone()) {
+                Ok(renderer) => self.wgpu_renderer = Some(renderer),
+                Err(error) => {
+                    eprintln!("cat-desk-pet: wgpu unavailable, falling back to native: {error}");
+                }
+            }
+        }
+
+        #[cfg(feature = "renderer-wgpu")]
+        let using_wgpu = self.wgpu_renderer.is_some();
+        #[cfg(not(feature = "renderer-wgpu"))]
+        let using_wgpu = false;
+
         #[cfg(not(target_os = "macos"))]
-        {
+        if !using_wgpu {
             let context = Context::new(window.clone()).expect("softbuffer context");
             let surface = Surface::new(&context, window.clone()).expect("softbuffer surface");
             self.context = Some(context);
             self.surface = Some(surface);
         }
 
+        if !using_wgpu {
+            eprintln!("cat-desk-pet: renderer=native");
+        }
+
         self.window = Some(window);
         if self.stress_props {
-            self.pet.spawn_bird_flyby();
-            self.pet.spawn_toy(ToyKind::Laser);
+            self.pet.force_stress_scene();
             self.stress_props = false;
             eprintln!("cat-desk-pet: stress props (bird + laser)");
         }
@@ -1071,6 +1126,36 @@ fn parse_stress_props() -> bool {
     std::env::args().any(|a| a == "--stress-props")
 }
 
+fn parse_renderer_preference() -> RendererPreference {
+    let mut requested = std::env::var("CAT_DESK_PET_RENDERER").ok();
+    let mut args = std::env::args().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--renderer" {
+            requested = args.next();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--renderer=") {
+            requested = Some(value.to_owned());
+        }
+    }
+    let preference = match requested.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("native") => RendererPreference::Native,
+        Some("wgpu") | Some("wgpu-atlas") => RendererPreference::Wgpu,
+        Some(other) => {
+            eprintln!("unknown --renderer {other} (use native|wgpu)");
+            RendererPreference::Native
+        }
+    };
+    #[cfg(not(feature = "renderer-wgpu"))]
+    if preference == RendererPreference::Wgpu {
+        eprintln!(
+            "cat-desk-pet: wgpu requested but this binary lacks --features renderer-wgpu; using native"
+        );
+        return RendererPreference::Native;
+    }
+    preference
+}
+
 fn parse_force_scene_value(v: &str) -> Option<ForceScene> {
     match v.to_ascii_lowercase().as_str() {
         "sleeping" | "sleep" => Some(ForceScene::Sleeping),
@@ -1103,6 +1188,7 @@ fn main() {
 
     let force = parse_force_scene();
     let stress_props = parse_stress_props();
+    let renderer_preference = parse_renderer_preference();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     let proxy = event_loop.create_proxy();
     MenuEvent::set_event_handler(Some(move |event| {
@@ -1111,15 +1197,10 @@ fn main() {
 
     // Rough primary-screen logical size fallback; refined once window exists.
     let (sw, sh) = (1440.0, 900.0);
-    let mut app = App::new(sw, sh);
+    let mut app = App::new(sw, sh, renderer_preference);
     app.stress_props = stress_props;
     if let Some(scene) = force {
-        app.pet.force_scene = Some(scene);
-        app.pet.mode = match scene {
-            ForceScene::Walking => Mode::Walking,
-            ForceScene::Idle => Mode::Idle,
-            ForceScene::Sleeping => Mode::Sleeping,
-        };
+        app.pet.force_benchmark_scene(scene);
         eprintln!("cat-desk-pet: force scene = {scene:?}");
     }
 
