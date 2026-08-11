@@ -12,11 +12,11 @@ Retain `renderer-wgpu` only as an opt-in experiment while the stacked issue #6 w
 
 ## Why
 
-On the tested Apple M5 system, wgpu did not reduce process CPU in any representative scenario. Median CPU increased from 0.40% to 1.10% sleeping, 1.10% to 2.15% idle, 2.90% to 3.20% walking, and 2.55% to 4.20% under bird-plus-laser stress. The idle backend was hybrid because real idle actions can create bubbles and particles that are not implemented in the GPU pipeline.
+On the tested Apple M5 system, the replayable `forced-v2` workload passed the sleeping CPU gate but failed the mandatory idle gate. Median-of-round CPU increased from 0.60% to 0.80% sleeping and from 0.50% to 1.20% idle; idle therefore regressed by 0.70 percentage points against a 0.5-point limit. The idle backend was hybrid because the fixed Yawn bubble is not implemented in the GPU pipeline.
 
-The Metal device/Surface fixed cost was also large for a tiny transparent window. Median-of-round footprint peaks were roughly 90-97 MiB for wgpu versus 14-20 MiB native. Walking RSS and binary-size deltas stayed inside their absolute gates, and stress footprint remained just below 100 MiB, but those passes do not offset the mandatory CPU failures or incomplete content path.
+The Metal device/Surface fixed cost was also large for a tiny transparent window. Median-of-round footprint peaks were 90.3 MiB sleeping and 90.8 MiB idle for wgpu versus 14.0 MiB and 15.4 MiB native. The binary-size delta stayed inside its absolute gate, but that does not offset the mandatory idle CPU failure or incomplete content path.
 
-Whole-system energy, cold start, and Windows acceptance were not pursued after the mandatory CPU gates failed. Missing data cannot be interpreted as a wgpu benefit.
+One deterministic walking pair was exploratory only, and the run was stopped before a complete walking matrix or replayable stress run. Whole-system energy, cold start, and Windows acceptance were not pursued after the mandatory idle CPU gate failed. Missing data cannot be interpreted as a wgpu benefit.
 
 Full data and method are in [`renderer-benchmark.md`](renderer-benchmark.md).
 

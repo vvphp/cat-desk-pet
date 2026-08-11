@@ -51,7 +51,10 @@ stop_app() {
   fi
   APP_PID=""
 }
-trap stop_app EXIT HUP INT TERM
+trap stop_app EXIT
+trap 'stop_app; exit 129' HUP
+trap 'stop_app; exit 130' INT
+trap 'stop_app; exit 143' TERM
 
 run_one() {
   backend="$1"
