@@ -83,7 +83,7 @@ run_one() {
 
   # AppKit/winit requires a foreground-like terminal in this environment.
   # `script` supplies the PTY while the sampler runs in this parent process.
-  script -Fq "$app_log" "$binary" --renderer "$renderer" --mode "$mode" $extra >"$script_stdout" 2>&1 &
+  script -Fq "$app_log" "$binary" --renderer "$renderer" --mode "$mode" $extra </dev/null >"$script_stdout" 2>&1 &
   SCRIPT_PID=$!
 
   attempt=0
@@ -121,6 +121,7 @@ run_one() {
     echo "wgpu direct-path violation; invalidating run: $app_log" >&2
     exit 1
   fi
+  sleep 1
 }
 
 for scenario in sleeping idle walking stress-props; do
