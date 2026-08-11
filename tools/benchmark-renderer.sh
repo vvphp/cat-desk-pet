@@ -49,6 +49,14 @@ safe_label() {
 }
 
 process_sample() {
+  if [[ -n "$CPU_TIME_HELPER" ]]; then
+    local cpu_seconds rss_kb
+    cpu_seconds="$("$CPU_TIME_HELPER" "$PID")" || return 1
+    rss_kb="$(LC_ALL=C ps -p "$PID" -o rss= 2>/dev/null | awk 'NF { print $1; exit }')"
+    [[ -n "$rss_kb" ]] || return 1
+    printf '%s,%s\n' "$cpu_seconds" "$rss_kb"
+    return
+  fi
   LC_ALL=C ps -p "$PID" -o time= -o rss= 2>/dev/null | awk '
     NF >= 2 {
       raw = $1
@@ -191,11 +199,27 @@ RUN_DIR="$OUT_DIR/${TIMESTAMP}-${SCENARIO}-${BACKEND}"
 [[ ! -e "$RUN_DIR" ]] || die "result directory already exists: $RUN_DIR"
 mkdir -p "$RUN_DIR"
 
+CPU_TIME_HELPER=""
+CPU_SAMPLE_METHOD="ps_cputime_delta_over_monotonic_interval"
+if [[ "$(uname -s)" = "Darwin" ]]; then
+  C_COMPILER="$(xcrun --find clang 2>/dev/null || command -v cc || true)"
+  [[ -n "$C_COMPILER" ]] || die "a C compiler is required for macOS CPU sampling"
+  C_SDKROOT="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+  [[ -n "$C_SDKROOT" ]] || die "the macOS SDK is required for CPU sampling"
+  CPU_TIME_HELPER="$RUN_DIR/.process-cpu-time"
+  "$C_COMPILER" -isysroot "$C_SDKROOT" -O2 -Wall -Wextra \
+    "$ROOT/tools/process-cpu-time.c" -o "$CPU_TIME_HELPER"
+  CPU_SAMPLE_METHOD="proc_pid_rusage_delta_over_monotonic_interval"
+fi
+
 SAMPLES="$RUN_DIR/samples.csv"
 CPU_SORTED="$RUN_DIR/.cpu-sorted"
 RSS_SORTED="$RUN_DIR/.rss-sorted"
 cleanup_samples() {
   rm -f "$CPU_SORTED" "$RSS_SORTED"
+  if [[ -n "$CPU_TIME_HELPER" ]]; then
+    rm -f "$CPU_TIME_HELPER"
+  fi
 }
 trap cleanup_samples EXIT
 trap 'cleanup_samples; exit 129' HUP
@@ -310,7 +334,7 @@ process_command=$PROCESS_COMMAND
 warm_seconds=$WARM_SECONDS
 sample_seconds=$SECONDS_TO_SAMPLE
 sample_count=$SECONDS_TO_SAMPLE
-cpu_sample_method=process_cputime_delta_over_monotonic_interval
+cpu_sample_method=$CPU_SAMPLE_METHOD
 cpu_avg_percent=$CPU_AVG
 cpu_min_percent=$CPU_MIN
 cpu_max_percent=$CPU_MAX
