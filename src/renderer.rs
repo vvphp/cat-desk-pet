@@ -111,6 +111,7 @@ impl HitMask {
         self.contains_desktop(origin_x + x, origin_y + y)
     }
 
+    #[cfg(test)]
     pub fn contains_physical(
         &self,
         x: f64,
@@ -170,10 +171,6 @@ pub struct RenderOutcome {
 /// until the experimental `wgpu` surface path is introduced.
 pub trait Renderer {
     fn render(&mut self, snapshot: &RenderSnapshot<'_>, viewport: FrameViewport) -> RenderOutcome;
-
-    fn pixels(&self) -> &[u32];
-
-    fn invalidate(&mut self);
 }
 
 /// Existing SVG/procedural CPU raster path, now behind `Renderer`.
@@ -190,6 +187,19 @@ impl NativeRenderer {
             pixels: Vec::new(),
             last_frame_key: None,
         }
+    }
+
+    /// CPU ARGB output consumed by the native platform presenter.
+    ///
+    /// This is intentionally not part of `Renderer`: a GPU backend must not
+    /// retain a duplicate CPU frame or read pixels back from the GPU.
+    pub fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    #[cfg(test)]
+    fn invalidate(&mut self) {
+        self.last_frame_key = None;
     }
 }
 
@@ -222,14 +232,6 @@ impl Renderer for NativeRenderer {
             frame_key,
             rasterized: true,
         }
-    }
-
-    fn pixels(&self) -> &[u32] {
-        &self.pixels
-    }
-
-    fn invalidate(&mut self) {
-        self.last_frame_key = None;
     }
 }
 
@@ -337,6 +339,7 @@ fn hash_frame(snapshot: &RenderSnapshot<'_>, viewport: FrameViewport, domain: u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pet::{FlyerKind, FlyerPhase, GiftKind, ParticleKind, ToyKind};
 
     fn viewport() -> FrameViewport {
         FrameViewport {
@@ -346,6 +349,74 @@ mod tests {
             origin_y: 270.0,
             scale: 1.0,
         }
+    }
+
+    fn key(pet: &Pet) -> FrameKey {
+        FrameKey::new(&RenderSnapshot::from(pet), viewport())
+    }
+
+    fn nested_pet() -> Pet {
+        let mut pet = Pet::new(1000.0, 700.0);
+        pet.feed = Some(Feed {
+            x: 490.0,
+            y: 510.0,
+            eat_t: None,
+            age: 1.0,
+        });
+        pet.toy = Some(Toy {
+            kind: ToyKind::Yarn,
+            x: 520.0,
+            y: 500.0,
+            vx: 1.0,
+            vy: 2.0,
+            hits: 0,
+            age: 0.5,
+            swat_t: 0.0,
+            spin: 0.25,
+            rat_x: 0.0,
+            rat_y: 0.0,
+            rat_next: 0.0,
+        });
+        pet.flyer = Some(Flyer {
+            kind: FlyerKind::Bird,
+            phase: FlyerPhase::FlyBy,
+            x: 530.0,
+            y: 430.0,
+            vx: 3.0,
+            age: 0.75,
+            land_t: 0.0,
+            nose: false,
+        });
+        pet.gift = Some(Gift {
+            kind: GiftKind::Leaf,
+            x: 505.0,
+            y: 515.0,
+            dropped: false,
+            drop_age: 0.0,
+            fade: 1.0,
+            lingering: false,
+        });
+        pet.laser_trail.push_back(LaserTrailPt {
+            x: 500.0,
+            y: 480.0,
+            t: 0.0,
+        });
+        pet.particles.push(Particle {
+            kind: ParticleKind::Dream,
+            x: 500.0,
+            y: 440.0,
+            age: 0.25,
+            life: 2.0,
+            label: Some("💤"),
+            vx: 0.0,
+            vy: -1.0,
+        });
+        pet.bubble = Some(SpeechBubble {
+            text: "喵".to_string(),
+            age: 0.1,
+            dur: 1.0,
+        });
+        pet
     }
 
     #[test]
@@ -360,6 +431,126 @@ mod tests {
         pet.x += 1.0;
         let moved = FrameKey::new(&RenderSnapshot::from(&pet), viewport());
         assert_ne!(first, moved);
+    }
+
+    #[test]
+    fn frame_key_covers_every_top_level_render_input() {
+        let cases: &[(&str, fn(&mut Pet))] = &[
+            ("mode", |pet| pet.mode = Mode::Idle),
+            ("x", |pet| pet.x += 1.0),
+            ("y", |pet| pet.y += 1.0),
+            ("facing", |pet| pet.facing = -1.0),
+            ("walk_phase", |pet| pet.walk_phase += 0.5),
+            ("idle_t", |pet| pet.idle_t += 0.5),
+            ("sleep_t", |pet| pet.sleep_t += 0.5),
+            ("idle_action", |pet| pet.idle_action = IdleAction::Yawn),
+            ("idle_action_t", |pet| pet.idle_action_t += 0.5),
+            ("dizzy_t", |pet| pet.dizzy_t += 0.5),
+            ("eat_anim_t", |pet| pet.eat_anim_t += 0.5),
+            ("home_x", |pet| pet.home_x += 1.0),
+            ("home_y", |pet| pet.home_y += 1.0),
+            ("species", |pet| pet.species = Species::Pig),
+            ("coat", |pet| pet.coat = CoatColor::Calico),
+            ("flash", |pet| pet.flash = 0.5),
+            ("clingy_arrived", |pet| pet.clingy_arrived = true),
+            ("trick_action", |pet| {
+                pet.trick_action = Some(TrickAction::Spin)
+            }),
+        ];
+
+        for (name, mutate) in cases {
+            let before = Pet::new(1000.0, 700.0);
+            let mut after = Pet::new(1000.0, 700.0);
+            mutate(&mut after);
+            assert_ne!(key(&before), key(&after), "missing top-level input: {name}");
+        }
+    }
+
+    #[test]
+    fn frame_key_covers_every_nested_render_input() {
+        let cases: &[(&str, fn(&mut Pet))] = &[
+            ("feed.x", |pet| pet.feed.as_mut().unwrap().x += 1.0),
+            ("feed.y", |pet| pet.feed.as_mut().unwrap().y += 1.0),
+            ("feed.eat_t", |pet| {
+                pet.feed.as_mut().unwrap().eat_t = Some(0.1)
+            }),
+            ("toy.kind", |pet| {
+                pet.toy.as_mut().unwrap().kind = ToyKind::Ball
+            }),
+            ("toy.x", |pet| pet.toy.as_mut().unwrap().x += 1.0),
+            ("toy.y", |pet| pet.toy.as_mut().unwrap().y += 1.0),
+            ("toy.age", |pet| pet.toy.as_mut().unwrap().age += 0.5),
+            ("toy.spin", |pet| pet.toy.as_mut().unwrap().spin += 0.5),
+            ("flyer.kind", |pet| {
+                pet.flyer.as_mut().unwrap().kind = FlyerKind::Butterfly
+            }),
+            ("flyer.x", |pet| pet.flyer.as_mut().unwrap().x += 1.0),
+            ("flyer.y", |pet| pet.flyer.as_mut().unwrap().y += 1.0),
+            ("flyer.vx", |pet| pet.flyer.as_mut().unwrap().vx += 1.0),
+            ("flyer.age", |pet| pet.flyer.as_mut().unwrap().age += 0.5),
+            ("gift.kind", |pet| {
+                pet.gift.as_mut().unwrap().kind = GiftKind::Flower
+            }),
+            ("gift.x", |pet| pet.gift.as_mut().unwrap().x += 1.0),
+            ("gift.y", |pet| pet.gift.as_mut().unwrap().y += 1.0),
+            ("gift.dropped", |pet| {
+                pet.gift.as_mut().unwrap().dropped = true
+            }),
+            ("gift.fade", |pet| pet.gift.as_mut().unwrap().fade = 0.5),
+            ("laser_trail.x", |pet| pet.laser_trail[0].x += 1.0),
+            ("laser_trail.y", |pet| pet.laser_trail[0].y += 1.0),
+            ("laser_trail.len", |pet| {
+                pet.laser_trail.push_back(LaserTrailPt {
+                    x: 1.0,
+                    y: 2.0,
+                    t: 0.0,
+                })
+            }),
+            ("particle.kind", |pet| {
+                pet.particles[0].kind = ParticleKind::Heart
+            }),
+            ("particle.x", |pet| pet.particles[0].x += 1.0),
+            ("particle.y", |pet| pet.particles[0].y += 1.0),
+            ("particle.age", |pet| pet.particles[0].age += 0.5),
+            ("particle.life", |pet| pet.particles[0].life += 0.5),
+            ("particle.label", |pet| pet.particles[0].label = Some("☁")),
+            ("bubble.text", |pet| {
+                pet.bubble.as_mut().unwrap().text.push('!')
+            }),
+            ("bubble.age", |pet| pet.bubble.as_mut().unwrap().age += 0.5),
+            ("bubble.dur", |pet| pet.bubble.as_mut().unwrap().dur += 0.5),
+        ];
+
+        for (name, mutate) in cases {
+            let before = nested_pet();
+            let mut after = nested_pet();
+            mutate(&mut after);
+            assert_ne!(key(&before), key(&after), "missing nested input: {name}");
+        }
+    }
+
+    #[test]
+    fn frame_key_covers_every_viewport_input() {
+        let pet = Pet::new(1000.0, 700.0);
+        let snapshot = RenderSnapshot::from(&pet);
+        let base = viewport();
+        let cases: &[(&str, fn(&mut FrameViewport))] = &[
+            ("width", |value| value.width += 1),
+            ("height", |value| value.height += 1),
+            ("origin_x", |value| value.origin_x += 1.0),
+            ("origin_y", |value| value.origin_y += 1.0),
+            ("scale", |value| value.scale += 0.25),
+        ];
+
+        for (name, mutate) in cases {
+            let mut changed = base;
+            mutate(&mut changed);
+            assert_ne!(
+                FrameKey::new(&snapshot, base),
+                FrameKey::new(&snapshot, changed),
+                "missing viewport input: {name}",
+            );
+        }
     }
 
     #[test]
