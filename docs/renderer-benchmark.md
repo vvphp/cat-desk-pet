@@ -30,10 +30,12 @@ Use the same fixed placement and display for all runs.
 
 | Scenario | Launch arguments | What it covers |
 |---|---|---|
-| sleeping | `--mode sleeping` | Static/low-frequency idle cost |
-| idle | `--mode idle` | Normal animated idle |
-| walking | `--mode walking` | Continuous sprite animation and movement |
-| stress-props | `--mode walking --stress-props` | Walking, birds, laser, particles, and large dirty regions |
+| sleeping | `--mode sleeping` | Fixed sleeping pose with live cursor input ignored |
+| idle | `--mode idle` | Fixed `Sit -> Yawn -> Stretch -> Look -> TailCurl` replay, including the same timed bubble |
+| walking | `--mode walking` | Fixed edge-to-edge walking path with no random targets |
+| stress-props | `--mode walking --stress-props` | Fixed walking path, repeated left-to-right bird, and clock-driven laser curve |
+
+These arguments select workload `forced-v2`. Every forced scenario ignores live cursor updates and removes random target/action selection, so native and wgpu receive the same replayable application state for a given timestep sequence. The A/B wrapper records `workload=forced-v2` in each `summary.txt`; results without that field, including the earlier 2026-08-11 run below, must not be mixed with this workload.
 
 For backend comparisons, run at least three rounds per scenario. Alternate order (`native → wgpu`, then `wgpu → native`) to reduce thermal and cache bias. Use a warm-up of at least 10 seconds and sample for at least 60 seconds at 1 Hz.
 
@@ -62,6 +64,7 @@ tools/benchmark-renderer.sh \
   --backend native \
   --warm 10 \
   --seconds 60 \
+  --workload forced-v2 \
   --binary target/release/cat-desk-pet
 ```
 

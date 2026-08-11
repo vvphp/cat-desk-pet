@@ -13,6 +13,7 @@ Options:
   --warm N            Warm-up seconds before sampling (default: 10)
   --out-dir DIR       Parent directory for results (default: benchmark-results)
   --binary PATH       Release binary used for the binary-size record
+  --workload NAME     Replayable workload version recorded in summary.txt
   -h, --help          Show this help
 
 The script writes samples.csv, summary.txt, and (on macOS) vmmap-summary.txt.
@@ -87,6 +88,7 @@ SECONDS_TO_SAMPLE=60
 WARM_SECONDS=10
 OUT_DIR="benchmark-results"
 BINARY=""
+WORKLOAD="unspecified"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -125,6 +127,11 @@ while [[ $# -gt 0 ]]; do
       BINARY="$2"
       shift 2
       ;;
+    --workload)
+      [[ $# -ge 2 ]] || die "--workload requires a value"
+      WORKLOAD="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -138,6 +145,7 @@ done
 is_positive_integer "$PID" || die "--pid must be a positive integer"
 safe_label "$SCENARIO" || die "--scenario may contain only letters, numbers, dot, underscore, and dash"
 safe_label "$BACKEND" || die "--backend may contain only letters, numbers, dot, underscore, and dash"
+safe_label "$WORKLOAD" || die "--workload may contain only letters, numbers, dot, underscore, and dash"
 is_positive_integer "$SECONDS_TO_SAMPLE" || die "--seconds must be a positive integer"
 is_non_negative_integer "$WARM_SECONDS" || die "--warm must be a non-negative integer"
 kill -0 "$PID" 2>/dev/null || die "process $PID is not running"
@@ -243,6 +251,7 @@ cpu_model=$CPU_MODEL
 ram_bytes=$RAM_BYTES
 scenario=$SCENARIO
 backend=$BACKEND
+workload=$WORKLOAD
 pid=$PID
 process_command=$PROCESS_COMMAND
 warm_seconds=$WARM_SECONDS

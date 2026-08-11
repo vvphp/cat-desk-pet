@@ -8,6 +8,7 @@ Usage: tools/benchmark-renderer-ab.sh NATIVE_BINARY WGPU_BINARY [SECONDS] [WARM]
 
 Runs sleeping, idle, walking, and stress-props three times per backend.
 Round order alternates native/wgpu to reduce thermal and cache bias.
+All scenarios use the replayable forced-v2 workload built into the binaries.
 Defaults: 60 one-second samples after a 10-second warm-up.
 EOF
 }
@@ -101,7 +102,8 @@ run_one() {
     --warm "$WARM_SECONDS" \
     --seconds "$SAMPLE_SECONDS" \
     --out-dir "$OUT_DIR" \
-    --binary "$binary"
+    --binary "$binary" \
+    --workload forced-v2
   stop_app
   if [[ "$reported_backend" = "wgpu-atlas" ]] && grep -q 'native-upload-fallback' "$app_log"; then
     echo "wgpu direct-path violation; invalidating run: $app_log" >&2

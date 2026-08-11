@@ -1200,12 +1200,7 @@ fn main() {
     let mut app = App::new(sw, sh, renderer_preference);
     app.stress_props = stress_props;
     if let Some(scene) = force {
-        app.pet.force_scene = Some(scene);
-        app.pet.mode = match scene {
-            ForceScene::Walking => Mode::Walking,
-            ForceScene::Idle => Mode::Idle,
-            ForceScene::Sleeping => Mode::Sleeping,
-        };
+        app.pet.force_benchmark_scene(scene);
         eprintln!("cat-desk-pet: force scene = {scene:?}");
     }
 
