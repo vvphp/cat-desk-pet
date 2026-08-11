@@ -4,9 +4,8 @@
 
 use std::cell::Cell;
 
-use crate::pet::{
-    CoatColor, FlyerKind, GiftKind, Mode, ParticleKind, Pet, Species, ToyKind,
-};
+use crate::pet::{CoatColor, FlyerKind, GiftKind, Mode, ParticleKind, Species, ToyKind};
+use crate::renderer::RenderSnapshot;
 use crate::sprite::{self, SpriteCache};
 use crate::text;
 
@@ -45,7 +44,7 @@ pub fn draw_pet(
     buf: &mut [u32],
     w: u32,
     h: u32,
-    pet: &Pet,
+    pet: &RenderSnapshot<'_>,
     origin_x: f64,
     origin_y: f64,
     sprites: &mut SpriteCache,
@@ -132,7 +131,7 @@ pub fn draw_pet(
                 FlyerKind::Butterfly => draw_butterfly(buf, w, h, fx, fy, flyer.age),
             }
         }
-        for p in &pet.particles {
+        for p in pet.particles {
             let (px, py) = to_local(p.x, p.y);
             draw_particle(buf, w, h, px, py, p);
         }
@@ -167,23 +166,23 @@ pub fn draw_pet(
     }
 }
 
-fn fur(pet: &Pet) -> (u8, u8, u8) {
+fn fur(pet: &RenderSnapshot<'_>) -> (u8, u8, u8) {
     pet.coat.palette().0
 }
-fn fur_dark(pet: &Pet) -> (u8, u8, u8) {
+fn fur_dark(pet: &RenderSnapshot<'_>) -> (u8, u8, u8) {
     pet.coat.palette().1
 }
-fn ink(pet: &Pet) -> (u8, u8, u8) {
+fn ink(pet: &RenderSnapshot<'_>) -> (u8, u8, u8) {
     pet.coat.palette().2
 }
-fn belly(pet: &Pet) -> (u8, u8, u8) {
+fn belly(pet: &RenderSnapshot<'_>) -> (u8, u8, u8) {
     pet.coat.palette().3
 }
-fn accent(pet: &Pet) -> (u8, u8, u8) {
+fn accent(pet: &RenderSnapshot<'_>) -> (u8, u8, u8) {
     pet.coat.palette().4
 }
 
-fn draw_coat_pattern(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
+fn draw_coat_pattern(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &RenderSnapshot<'_>) {
     let (ar, ag, ab) = accent(pet);
     let (br, bg, bb) = belly(pet);
     match pet.coat {
@@ -218,7 +217,7 @@ fn draw_coat_pattern(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pe
     }
 }
 
-fn draw_walking(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &Pet) {
+fn draw_walking(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64, pet: &RenderSnapshot<'_>) {
     let (r, g, b) = fur(pet);
     let (dr, dg, db) = fur_dark(pet);
     let (ir, ig, ib) = ink(pet);
@@ -534,7 +533,7 @@ fn draw_wand(buf: &mut [u32], w: u32, h: u32, x: f64, y: f64, spin_deg: f64) {
     fill_ellipse(buf, w, h, x, y, 3.5, 3.5, 0xF4, 0xE8, 0xA0);
 }
 
-fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &Pet, origin_x: f64, origin_y: f64) {
+fn draw_laser_trail(buf: &mut [u32], w: u32, h: u32, pet: &RenderSnapshot<'_>, origin_x: f64, origin_y: f64) {
     let pts: Vec<_> = pet.laser_trail.iter().copied().collect();
     if pts.len() < 2 {
         return;
@@ -657,7 +656,7 @@ fn draw_bed(buf: &mut [u32], w: u32, h: u32, cx: f64, cy: f64) {
     fill_ellipse(buf, w, h, cx - 6.0, cy - 2.0, 18.0, 4.0, 0xE8, 0xD4, 0xB8);
 }
 
-fn ear(buf: &mut [u32], w: u32, h: u32, tip_x: f64, tip_y: f64, side: f64, pet: &Pet) {
+fn ear(buf: &mut [u32], w: u32, h: u32, tip_x: f64, tip_y: f64, side: f64, pet: &RenderSnapshot<'_>) {
     let (r, g, b) = fur(pet);
     match pet.species {
         Species::Cat => {
@@ -713,7 +712,7 @@ fn ear(buf: &mut [u32], w: u32, h: u32, tip_x: f64, tip_y: f64, side: f64, pet: 
     }
 }
 
-fn draw_face(buf: &mut [u32], w: u32, h: u32, hx: f64, hy: f64, pet: &Pet) {
+fn draw_face(buf: &mut [u32], w: u32, h: u32, hx: f64, hy: f64, pet: &RenderSnapshot<'_>) {
     match pet.species {
         Species::Cat => {
             // tiny nose already covered by eye dots in most poses
@@ -777,7 +776,7 @@ fn draw_face(buf: &mut [u32], w: u32, h: u32, hx: f64, hy: f64, pet: &Pet) {
     }
 }
 
-fn draw_tail(buf: &mut [u32], w: u32, h: u32, tx: f64, ty: f64, pet: &Pet) {
+fn draw_tail(buf: &mut [u32], w: u32, h: u32, tx: f64, ty: f64, pet: &RenderSnapshot<'_>) {
     let (r, g, b) = fur(pet);
     match pet.species {
         Species::Cat => {

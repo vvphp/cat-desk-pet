@@ -14,7 +14,8 @@ const MAX_CACHE_RETINA: usize = 48;
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{Options, Tree};
 
-use crate::pet::{CoatColor, IdleAction, Mode, Pet, Species, TrickAction};
+use crate::pet::{CoatColor, IdleAction, Mode, Species, TrickAction};
+use crate::renderer::RenderSnapshot;
 
 const PET_SVG: &str = include_str!("../assets/pet.svg");
 
@@ -80,7 +81,7 @@ impl SpriteCache {
         }
     }
 
-    pub fn pixels_for(&mut self, pet: &Pet, scale: f64) -> &[u32] {
+    pub fn pixels_for(&mut self, pet: &RenderSnapshot<'_>, scale: f64) -> &[u32] {
         let key = key_for(pet, scale);
         if self.cache.contains_key(&key) {
             if let Some(i) = self.order.iter().position(|k| *k == key) {
@@ -135,7 +136,7 @@ fn sprite_px(dpr_q: u8) -> (u32, u32) {
     )
 }
 
-fn key_for(pet: &Pet, scale: f64) -> SpriteKey {
+fn key_for(pet: &RenderSnapshot<'_>, scale: f64) -> SpriteKey {
     let pose = pose_for(pet);
     SpriteKey {
         species: pet.species,
@@ -156,7 +157,7 @@ fn quantize(v: f64, step: f64, lo: f64, hi: f64) -> i8 {
     q.round() as i8
 }
 
-fn pose_for(pet: &Pet) -> AnimPose {
+fn pose_for(pet: &RenderSnapshot<'_>) -> AnimPose {
     match pet.mode {
         Mode::Walking
         | Mode::GoingHome
@@ -257,7 +258,7 @@ fn pose_for(pet: &Pet) -> AnimPose {
     }
 }
 
-fn idle_pose(pet: &Pet) -> AnimPose {
+fn idle_pose(pet: &RenderSnapshot<'_>) -> AnimPose {
     let t = pet.idle_t;
     let action_t = pet.idle_action_t;
     match pet.idle_action {
@@ -302,7 +303,7 @@ fn idle_pose(pet: &Pet) -> AnimPose {
     }
 }
 
-fn eyes_for(pet: &Pet) -> EyeStyle {
+fn eyes_for(pet: &RenderSnapshot<'_>) -> EyeStyle {
     if pet.mode == Mode::Idle {
         return match pet.idle_action {
             IdleAction::Yawn => EyeStyle::Happy,
@@ -336,7 +337,7 @@ fn eyes_for(pet: &Pet) -> EyeStyle {
     }
 }
 
-fn mouth_for(pet: &Pet) -> MouthStyle {
+fn mouth_for(pet: &RenderSnapshot<'_>) -> MouthStyle {
     if pet.mode == Mode::Idle {
         return match pet.idle_action {
             IdleAction::Yawn => MouthStyle::Tongue,
