@@ -1,5 +1,5 @@
 <svg viewBox="0 0 120 110" xmlns="http://www.w3.org/2000/svg" class="cat-svg" preserveAspectRatio="xMidYMax meet">
-  <ellipse cx="60" cy="103" rx="40" ry="3.2" fill="rgba(0,0,0,0.20)"/>
+  <ellipse id="layer-shadow" cx="60" cy="103" rx="40" ry="3.2" fill="#000000" opacity="0.20"/>
 
   <g id="tail" style="transform-origin: 22px 66px;">
     <path d="M 24 82 Q 8 80, 8 66 Q 10 56, 22 58" stroke="var(--body)" stroke-width="13" fill="none" stroke-linecap="round"/>
@@ -8,7 +8,7 @@
   <g id="leg-bl" style="transform-origin: 42px 95px;"></g>
   <g id="leg-br" style="transform-origin: 82px 95px;"></g>
 
-  <ellipse cx="60" cy="68" rx="42" ry="34" fill="var(--body)"/>
+  <ellipse id="body-shell" cx="60" cy="68" rx="42" ry="34" fill="var(--body)"/>
 
   <g class="pattern pattern-stripes">
     <path d="M 38 50 Q 44 46, 50 50" stroke="var(--body-dark)" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.6"/>
@@ -32,7 +32,7 @@
     <ellipse cx="82" cy="98" rx="9" ry="5" fill="var(--belly)"/>
   </g>
 
-  <ellipse cx="60" cy="86" rx="28" ry="11" fill="var(--belly)" opacity="0.55" class="belly-default"/>
+  <ellipse id="belly-default" cx="60" cy="86" rx="28" ry="11" fill="var(--belly)" opacity="0.55"/>
 
   <g id="cat-ears">
     <path d="M 30 40 Q 28 30, 40 30 Q 50 34, 48 42 Q 40 44, 30 40 Z" fill="var(--body)"/>
@@ -41,7 +41,7 @@
     <path d="M 84 38 Q 84 33, 78 34 Q 75 38, 78 41 Q 82 41, 84 38 Z" fill="var(--inner-ear)" opacity="0.85"/>
   </g>
 
-  <ellipse cx="60" cy="74" rx="18" ry="10" fill="var(--belly)" opacity="0.55"/>
+  <ellipse id="face-muzzle" cx="60" cy="74" rx="18" ry="10" fill="var(--belly)" opacity="0.55"/>
 
   <g id="head"></g>
 
@@ -137,8 +137,10 @@
     <path id="mouth-open" d="M 56 75 Q 60 81, 64 75 Q 60 78, 56 75 Z" fill="#C2546F" opacity="0"/>
   </g>
 
-  <ellipse cx="42" cy="70" rx="4.5" ry="2.6" fill="var(--blush)" opacity="0.7"/>
-  <ellipse cx="78" cy="70" rx="4.5" ry="2.6" fill="var(--blush)" opacity="0.7"/>
+  <g id="blush">
+    <ellipse cx="42" cy="70" rx="4.5" ry="2.6" fill="var(--blush)" opacity="0.7"/>
+    <ellipse cx="78" cy="70" rx="4.5" ry="2.6" fill="var(--blush)" opacity="0.7"/>
+  </g>
 
   <g id="whisker-l" style="transform-origin: 40px 73px;">
     <path d="M 40 72 L 26 70" stroke="var(--whisker)" stroke-width="1" stroke-linecap="round" opacity="0.85"/>
@@ -157,8 +159,10 @@
   </g>
 
   <!-- pig parts: drooping ears, big snout, curly tail -->
-  <g class="species-pig">
+  <g id="tail-pig" class="species-pig">
     <path d="M 24 80 Q 16 78, 14 82 Q 14 86, 20 86 Q 24 84, 20 80" stroke="var(--body-dark)" stroke-width="3" fill="none" stroke-linecap="round"/>
+  </g>
+  <g id="species-pig" class="species-pig">
     <path d="M 32 38 Q 28 50, 42 50 Q 50 42, 44 30 Q 36 30, 32 38 Z" fill="var(--body-dark)"/>
     <path d="M 36 40 Q 36 46, 41 45 Q 43 41, 39 37 Z" fill="var(--inner-ear)" opacity="0.7"/>
     <path d="M 88 38 Q 92 50, 78 50 Q 70 42, 76 30 Q 84 30, 88 38 Z" fill="var(--body-dark)"/>
@@ -169,8 +173,10 @@
   </g>
 
   <!-- bear parts: round ears, big black nose, tiny round tail -->
-  <g class="species-bear">
+  <g id="tail-bear" class="species-bear">
     <ellipse cx="22" cy="78" rx="6" ry="5" fill="var(--body)"/>
+  </g>
+  <g id="species-bear" class="species-bear">
     <circle cx="38" cy="32" r="9" fill="var(--body)"/>
     <circle cx="82" cy="32" r="9" fill="var(--body)"/>
     <circle cx="38" cy="33" r="4.5" fill="var(--inner-ear)"/>

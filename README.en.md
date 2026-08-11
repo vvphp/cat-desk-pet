@@ -7,7 +7,7 @@
 [简体中文](README.md) · **English**
 
 **A hand-drawn little animal that lives on your desktop.**  
-Native small window · Rust state machine · SVG (resvg) · **no WebView**  
+Native small window · Rust state machine · offline layered atlas · **no WebView**
 Product name: **摸鱼猫** · macOS package: `摸鱼猫.app` / `摸鱼猫.dmg`
 
 </div>
@@ -30,7 +30,9 @@ cargo run --release
 
 ## Architecture
 
-Tray / context menu → ~180×180 always-on-top transparent window → SVG via resvg → CALayer (macOS) / softbuffer (elsewhere) ← Rust behavior state machine.
+Tray / context menu → ~180×180 always-on-top transparent window → layered atlas → native renderer → CALayer (macOS) / softbuffer (elsewhere) ← Rust behavior state machine.
+
+Normal runtime builds do not parse SVG. See [`docs/renderer-assets.md`](docs/renderer-assets.md) for the explicit asset compiler and reproducibility check.
 
 See [`docs/perf.md`](docs/perf.md) for CPU notes.
 

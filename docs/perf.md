@@ -4,6 +4,8 @@
 
 Issue #6 的 native / `wgpu` 双后端测量口径与报告模板见 [`renderer-benchmark.md`](renderer-benchmark.md)。在同机对照完成前，历史数据不能作为切换默认后端的依据。
 
+双后端共用的离线分层图集格式、生成命令与复现检查见 [`renderer-assets.md`](renderer-assets.md)。
+
 ## 运行
 
 ```bash

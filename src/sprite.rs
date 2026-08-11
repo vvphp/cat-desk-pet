@@ -1,4 +1,4 @@
-//! Rasterize the original WebView `CAT_SVG` via resvg for softbuffer blit.
+//! Compose the generated indexed layered atlas for native softbuffer blit.
 //!
 //! Appearance (coat / species / face) and quantized leg/tail poses are cached
 //! with a hard LRU cap — unbounded pose keys were leaking RAM until the
@@ -11,13 +11,9 @@ use std::f64::consts::TAU;
 const MAX_CACHE_1X: usize = 32;
 const MAX_CACHE_RETINA: usize = 48;
 
-use resvg::tiny_skia::{Pixmap, Transform};
-use resvg::usvg::{Options, Tree};
-
+use crate::atlas::{self, AtlasRegion};
 use crate::pet::{CoatColor, IdleAction, Mode, Species, TrickAction};
 use crate::renderer::RenderSnapshot;
-
-const PET_SVG: &str = include_str!("../assets/pet.svg");
 
 /// Logical sprite size — matches WebView `#cat` (120×110 CSS px).
 pub const SPRITE_W: u32 = 120;
@@ -97,8 +93,7 @@ impl SpriteCache {
                     break;
                 }
             }
-            let (sw, sh) = sprite_px(key.dpr_q);
-            let px = rasterize(key).unwrap_or_else(|| vec![0; (sw * sh) as usize]);
+            let px = compose(key);
             self.cache.insert(key, px);
             self.order.push_back(key);
         }
@@ -359,145 +354,6 @@ fn mouth_for(pet: &RenderSnapshot<'_>) -> MouthStyle {
     }
 }
 
-struct Palette {
-    body: &'static str,
-    body_dark: &'static str,
-    belly: &'static str,
-    inner_ear: &'static str,
-    nose: &'static str,
-    eye: &'static str,
-    whisker: &'static str,
-    blush: &'static str,
-    accent: &'static str,
-    snout: &'static str,
-}
-
-fn palette(coat: CoatColor) -> Palette {
-    // Matches src/styles.css coat variables.
-    match coat {
-        CoatColor::Orange => Palette {
-            body: "#F4A56B",
-            body_dark: "#C66A2C",
-            belly: "#FFF1DC",
-            inner_ear: "#FFB8C1",
-            nose: "#E36B7A",
-            eye: "#2D1A0A",
-            whisker: "#5A3A24",
-            blush: "#FFB3BA",
-            accent: "#C66A2C",
-            snout: "#E89DAE",
-        },
-        CoatColor::Calico => Palette {
-            body: "#FFF1DC",
-            body_dark: "#2C2828",
-            belly: "#FFFFFF",
-            inner_ear: "#FFB8C1",
-            nose: "#E36B7A",
-            eye: "#2D1A0A",
-            whisker: "#6A5A4A",
-            blush: "#FFB3BA",
-            accent: "#F4A56B",
-            snout: "#E89DAE",
-        },
-        CoatColor::Cow => Palette {
-            body: "#FFFFFF",
-            body_dark: "#2C2828",
-            belly: "#FFFFFF",
-            inner_ear: "#FFB8C1",
-            nose: "#FF85A1",
-            eye: "#2D1A0A",
-            whisker: "#6A5A4A",
-            blush: "#FFB3BA",
-            accent: "#2C2828",
-            snout: "#E89DAE",
-        },
-        CoatColor::Tabby => Palette {
-            body: "#A89E91",
-            body_dark: "#5C544A",
-            belly: "#DAD2C6",
-            inner_ear: "#E8A8B0",
-            nose: "#3C3530",
-            eye: "#1A1A1A",
-            whisker: "#FFFFFF",
-            blush: "#FFB3BA",
-            accent: "#5C544A",
-            snout: "#E89DAE",
-        },
-        CoatColor::Tuxedo => Palette {
-            body: "#2A2828",
-            body_dark: "#000000",
-            belly: "#FFFFFF",
-            inner_ear: "#FFB8C1",
-            nose: "#FF85A1",
-            eye: "#FFD23B",
-            whisker: "#FFFFFF",
-            blush: "#FFB3BA",
-            accent: "#FFFFFF",
-            snout: "#E89DAE",
-        },
-        CoatColor::Pink => Palette {
-            body: "#F5B5C0",
-            body_dark: "#C2778A",
-            belly: "#FFE6EE",
-            inner_ear: "#E8929E",
-            nose: "#C2546F",
-            eye: "#2D1A0A",
-            whisker: "transparent",
-            blush: "#FFB3BA",
-            accent: "#C2778A",
-            snout: "#E89DAE",
-        },
-        CoatColor::Cream => Palette {
-            body: "#FFE0C2",
-            body_dark: "#D8B591",
-            belly: "#FFF4E0",
-            inner_ear: "#E8B998",
-            nose: "#B27858",
-            eye: "#2D1A0A",
-            whisker: "transparent",
-            blush: "#FFB3BA",
-            accent: "#D8B591",
-            snout: "#E8C6A6",
-        },
-        CoatColor::Brown => Palette {
-            body: "#A87248",
-            body_dark: "#5E3D1F",
-            belly: "#D2A878",
-            inner_ear: "#6A4525",
-            nose: "#1A0F0F",
-            eye: "#2D1A0A",
-            whisker: "transparent",
-            blush: "#FFB3BA",
-            accent: "#5E3D1F",
-            snout: "#E89DAE",
-        },
-        CoatColor::Black => Palette {
-            body: "#3C2D2D",
-            body_dark: "#1A0F0F",
-            belly: "#5E4C4C",
-            inner_ear: "#2A1818",
-            nose: "#000000",
-            eye: "#FFD23B",
-            whisker: "transparent",
-            blush: "#FFB3BA",
-            accent: "#1A0F0F",
-            snout: "#E89DAE",
-        },
-        CoatColor::Polar => Palette {
-            body: "#F2EDE2",
-            body_dark: "#C8C0B0",
-            belly: "#FFFFFF",
-            inner_ear: "#D8D0C0",
-            nose: "#1A1A1A",
-            eye: "#2D1A0A",
-            whisker: "transparent",
-            blush: "#FFB3BA",
-            accent: "#C8C0B0",
-            snout: "#E89DAE",
-        },
-    }
-}
-
 fn pattern_class(coat: CoatColor) -> Option<&'static str> {
     match coat {
         CoatColor::Orange | CoatColor::Tabby => Some("pattern-stripes"),
@@ -531,123 +387,189 @@ fn mouth_class(m: MouthStyle) -> &'static str {
     }
 }
 
-fn build_svg(key: SpriteKey) -> String {
-    let p = palette(key.coat);
-    let mut svg = PET_SVG.to_string();
-    // resvg doesn't resolve CSS variables — substitute concrete colors.
-    for (name, val) in [
-        ("var(--body-dark)", p.body_dark),
-        ("var(--body)", p.body),
-        ("var(--belly)", p.belly),
-        ("var(--inner-ear)", p.inner_ear),
-        ("var(--nose)", p.nose),
-        ("var(--eye)", p.eye),
-        ("var(--whisker)", p.whisker),
-        ("var(--blush)", p.blush),
-        ("var(--accent, #F4A56B)", p.accent),
-        ("var(--accent)", p.accent),
-        ("var(--snout, #E89DAE)", p.snout),
-        ("var(--snout)", p.snout),
-    ] {
-        svg = svg.replace(name, val);
-    }
-
-    let pattern = pattern_class(key.coat)
-        .map(|c| format!(".{c} {{ display: inline; }}"))
-        .unwrap_or_default();
-
-    let (show_pig, show_bear, hide_cat_bits) = match key.species {
-        Species::Cat => ("none", "none", ""),
-        Species::Pig => (
-            "inline",
-            "none",
-            "#cat-ears, #cat-nose, #tail, #whisker-l, #whisker-r { display: none; }",
-        ),
-        Species::Bear => (
-            "none",
-            "inline",
-            "#cat-ears, #cat-nose, #tail, #whisker-l, #whisker-r { display: none; }",
-        ),
-    };
-
-    let style = format!(
-        r#"
-<style type="text/css">
-  .species-pig {{ display: {show_pig}; }}
-  .species-bear {{ display: {show_bear}; }}
-  .pattern {{ display: none; }}
-  {pattern}
-  .eye-style, .mouth-style {{ display: none; }}
-  .{eye} {{ display: inline; }}
-  .{mouth} {{ display: inline; }}
-  {hide_cat_bits}
-</style>
-"#,
-        eye = eye_class(key.eyes),
-        mouth = mouth_class(key.mouth),
-    );
-
-    if let Some(i) = svg.find('>') {
-        svg.insert_str(i + 1, &style);
-    }
-
-    // Pose: SVG transform (usvg ignores CSS transform-origin on style=).
-    svg = svg.replace(
-        r#"<g id="tail" style="transform-origin: 22px 66px;">"#,
-        &format!(
-            r#"<g id="tail" transform="rotate({}, 22, 66)">"#,
-            key.tail_q
-        ),
-    );
-    svg = svg.replace(
-        r#"<g id="leg-fl" style="transform-origin: 42px 95px;">"#,
-        &format!(
-            r#"<g id="leg-fl" transform="translate(0, {})">"#,
-            key.leg_fl_q
-        ),
-    );
-    svg = svg.replace(
-        r#"<g id="leg-fr" style="transform-origin: 82px 95px;">"#,
-        &format!(
-            r#"<g id="leg-fr" transform="translate(0, {})">"#,
-            key.leg_fr_q
-        ),
-    );
-
-    svg
+#[derive(Clone, Copy)]
+struct LayerTransform {
+    rotation_deg: f64,
+    pivot_x: f64,
+    pivot_y: f64,
+    translate_x: f64,
+    translate_y: f64,
 }
 
-fn rasterize(key: SpriteKey) -> Option<Vec<u32>> {
-    let svg = build_svg(key);
-    let opt = Options::default();
-    let tree = Tree::from_str(&svg, &opt).ok()?;
-    let (sw, sh) = sprite_px(key.dpr_q);
-    let mut pixmap = Pixmap::new(sw, sh)?;
-    // SVG viewBox is 120×110 — scale up for Retina rasters.
-    let ts = Transform::from_scale(sw as f32 / 120.0, sh as f32 / 110.0);
-    resvg::render(&tree, ts, &mut pixmap.as_mut());
+impl LayerTransform {
+    const IDENTITY: Self = Self {
+        rotation_deg: 0.0,
+        pivot_x: 0.0,
+        pivot_y: 0.0,
+        translate_x: 0.0,
+        translate_y: 0.0,
+    };
+}
 
-    let mut out = Vec::with_capacity((sw * sh) as usize);
-    for px in pixmap.pixels() {
-        // tiny-skia PremultipliedColorU8 → straight-ish ARGB for softbuffer
-        let a = px.alpha();
-        let r = px.red();
-        let g = px.green();
-        let b = px.blue();
-        // un-premultiply if needed for clearer colors on transparent windows
-        let (r, g, b) = if a > 0 && a < 255 {
-            let fa = a as f32;
-            (
-                ((r as f32) * 255.0 / fa).min(255.0) as u8,
-                ((g as f32) * 255.0 / fa).min(255.0) as u8,
-                ((b as f32) * 255.0 / fa).min(255.0) as u8,
-            )
-        } else {
-            (r, g, b)
-        };
-        out.push(crate::render::pack(a, r, g, b));
+fn compose(key: SpriteKey) -> Vec<u32> {
+    let (width, height) = sprite_px(key.dpr_q);
+    let mut out = vec![0; (width * height) as usize];
+    let mut layer = |name: &str, transform: LayerTransform| {
+        let region = atlas::region(name).unwrap_or_else(|| panic!("missing atlas region {name}"));
+        composite_layer(&mut out, width, height, key.coat, region, transform);
+    };
+
+    layer("shadow", LayerTransform::IDENTITY);
+    if key.species == Species::Cat {
+        layer(
+            "tail-cat",
+            LayerTransform {
+                rotation_deg: key.tail_q as f64,
+                pivot_x: 22.0,
+                pivot_y: 66.0,
+                ..LayerTransform::IDENTITY
+            },
+        );
     }
-    Some(out)
+    layer("body-shell", LayerTransform::IDENTITY);
+    if let Some(pattern) = pattern_class(key.coat) {
+        layer(pattern, LayerTransform::IDENTITY);
+    }
+    layer("belly", LayerTransform::IDENTITY);
+    if key.species == Species::Cat {
+        layer("cat-ears", LayerTransform::IDENTITY);
+    }
+    layer("muzzle", LayerTransform::IDENTITY);
+    layer(eye_class(key.eyes), LayerTransform::IDENTITY);
+    if key.species == Species::Cat {
+        layer("cat-nose", LayerTransform::IDENTITY);
+    }
+    layer(mouth_class(key.mouth), LayerTransform::IDENTITY);
+    layer("blush", LayerTransform::IDENTITY);
+    if key.species == Species::Cat {
+        layer("whiskers", LayerTransform::IDENTITY);
+    }
+    layer(
+        "leg-fl",
+        LayerTransform {
+            translate_y: key.leg_fl_q as f64,
+            ..LayerTransform::IDENTITY
+        },
+    );
+    layer(
+        "leg-fr",
+        LayerTransform {
+            translate_y: key.leg_fr_q as f64,
+            ..LayerTransform::IDENTITY
+        },
+    );
+    match key.species {
+        Species::Cat => {}
+        Species::Pig => {
+            layer("tail-pig", LayerTransform::IDENTITY);
+            layer("species-pig", LayerTransform::IDENTITY);
+        }
+        Species::Bear => {
+            layer("tail-bear", LayerTransform::IDENTITY);
+            layer("species-bear", LayerTransform::IDENTITY);
+        }
+    }
+    out
+}
+
+fn composite_layer(
+    out: &mut [u32],
+    width: u32,
+    height: u32,
+    coat: CoatColor,
+    region: &AtlasRegion,
+    transform: LayerTransform,
+) {
+    let scale = width as f64 / SPRITE_W as f64;
+    let source_left = region.source_x as f64 / atlas::ATLAS_SCALE;
+    let source_top = region.source_y as f64 / atlas::ATLAS_SCALE;
+    let source_right = (region.source_x + region.width) as f64 / atlas::ATLAS_SCALE;
+    let source_bottom = (region.source_y + region.height) as f64 / atlas::ATLAS_SCALE;
+    let angle = transform.rotation_deg.to_radians();
+    let (sin, cos) = angle.sin_cos();
+
+    let transform_point = |x: f64, y: f64| {
+        let dx = x - transform.pivot_x;
+        let dy = y - transform.pivot_y;
+        (
+            transform.pivot_x + dx * cos - dy * sin + transform.translate_x,
+            transform.pivot_y + dx * sin + dy * cos + transform.translate_y,
+        )
+    };
+    let corners = [
+        transform_point(source_left, source_top),
+        transform_point(source_right, source_top),
+        transform_point(source_right, source_bottom),
+        transform_point(source_left, source_bottom),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let x0 = (min_x * scale).floor().max(0.0) as i32;
+    let x1 = (max_x * scale).ceil().min(width as f64) as i32;
+    let y0 = (min_y * scale).floor().max(0.0) as i32;
+    let y1 = (max_y * scale).ceil().min(height as f64) as i32;
+
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let transformed_x = (x as f64 + 0.5) / scale - transform.translate_x;
+            let transformed_y = (y as f64 + 0.5) / scale - transform.translate_y;
+            let dx = transformed_x - transform.pivot_x;
+            let dy = transformed_y - transform.pivot_y;
+            let source_x = transform.pivot_x + dx * cos + dy * sin;
+            let source_y = transform.pivot_y - dx * sin + dy * cos;
+            let (role, coverage) = atlas::sample(region, source_x, source_y);
+            if coverage == 0 {
+                continue;
+            }
+            let [r, g, b, palette_alpha] = atlas::role_color(coat, role);
+            let alpha = (coverage as u32 * palette_alpha as u32 / 255) as u8;
+            if alpha == 0 {
+                continue;
+            }
+            let index = (y as u32 * width + x as u32) as usize;
+            out[index] = blend_straight(out[index], r, g, b, alpha);
+        }
+    }
+}
+
+fn blend_straight(dst: u32, sr: u8, sg: u8, sb: u8, sa: u8) -> u32 {
+    if sa == 255 {
+        return crate::render::pack(sa, sr, sg, sb);
+    }
+    let da = ((dst >> 24) & 0xff) as u32;
+    let dr = ((dst >> 16) & 0xff) as u32;
+    let dg = ((dst >> 8) & 0xff) as u32;
+    let db = (dst & 0xff) as u32;
+    let sa = sa as u32;
+    let inv = 255 - sa;
+    let out_a = sa + (da * inv + 127) / 255;
+    if out_a == 0 {
+        return 0;
+    }
+    let blend_channel = |source: u8, dest: u32| {
+        let premul = source as u32 * sa + (dest * da * inv + 127) / 255;
+        ((premul + out_a / 2) / out_a).min(255) as u8
+    };
+    crate::render::pack(
+        out_a.min(255) as u8,
+        blend_channel(sr, dr),
+        blend_channel(sg, dg),
+        blend_channel(sb, db),
+    )
 }
 
 /// Blit cached sprite into a **physical** buffer (coords already × scale).
@@ -708,6 +630,196 @@ pub fn blit_sprite(
             let nb = (sb as f32 * k + db as f32 * (1.0 - k)) as u8;
             let na = a.max(da);
             buf[i] = crate::render::pack(na, nr, ng, nb);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "asset-compiler"))]
+mod visual_parity_tests {
+    use resvg::tiny_skia::{Pixmap, Transform};
+    use resvg::usvg::{Options, Tree};
+
+    use super::*;
+
+    fn css_color(coat: CoatColor, role: u8) -> String {
+        let [r, g, b, a] = atlas::role_color(coat, role);
+        if a == 0 {
+            "transparent".to_owned()
+        } else {
+            format!("#{r:02X}{g:02X}{b:02X}")
+        }
+    }
+
+    fn reference_svg(key: SpriteKey) -> String {
+        let mut svg = include_str!("../assets/pet.svg").to_owned();
+        for (token, role) in [
+            ("var(--accent, #F4A56B)", 9),
+            ("var(--snout, #E89DAE)", 10),
+            ("var(--body-dark)", 2),
+            ("var(--body)", 1),
+            ("var(--belly)", 3),
+            ("var(--inner-ear)", 4),
+            ("var(--nose)", 5),
+            ("var(--eye)", 6),
+            ("var(--whisker)", 7),
+            ("var(--blush)", 8),
+            ("var(--accent)", 9),
+            ("var(--snout)", 10),
+        ] {
+            svg = svg.replace(token, &css_color(key.coat, role));
+        }
+        let pattern = pattern_class(key.coat)
+            .map(|class| format!(".{class}{{display:inline}}"))
+            .unwrap_or_default();
+        let (pig, bear, hide_cat) = match key.species {
+            Species::Cat => ("none", "none", ""),
+            Species::Pig => (
+                "inline",
+                "none",
+                "#cat-ears,#cat-nose,#tail,#whisker-l,#whisker-r{display:none}",
+            ),
+            Species::Bear => (
+                "none",
+                "inline",
+                "#cat-ears,#cat-nose,#tail,#whisker-l,#whisker-r{display:none}",
+            ),
+        };
+        let style = format!(
+            "<style>.species-pig{{display:{pig}}}.species-bear{{display:{bear}}}.pattern,.eye-style,.mouth-style{{display:none}}{pattern}.{}{{display:inline}}.{}{{display:inline}}{hide_cat}</style>",
+            eye_class(key.eyes),
+            mouth_class(key.mouth),
+        );
+        if let Some(open_end) = svg.find('>') {
+            svg.insert_str(open_end + 1, &style);
+        }
+        svg = svg.replace(
+            r#"<g id="tail" style="transform-origin: 22px 66px;">"#,
+            &format!(
+                r#"<g id="tail" transform="rotate({}, 22, 66)">"#,
+                key.tail_q
+            ),
+        );
+        svg = svg.replace(
+            r#"<g id="leg-fl" style="transform-origin: 42px 95px;">"#,
+            &format!(
+                r#"<g id="leg-fl" transform="translate(0, {})">"#,
+                key.leg_fl_q
+            ),
+        );
+        svg = svg.replace(
+            r#"<g id="leg-fr" style="transform-origin: 82px 95px;">"#,
+            &format!(
+                r#"<g id="leg-fr" transform="translate(0, {})">"#,
+                key.leg_fr_q
+            ),
+        );
+        svg
+    }
+
+    fn reference_pixels(key: SpriteKey) -> Vec<u32> {
+        let tree = Tree::from_str(&reference_svg(key), &Options::default()).unwrap();
+        let (width, height) = sprite_px(key.dpr_q);
+        let mut pixmap = Pixmap::new(width, height).unwrap();
+        let scale = dpr_of(key.dpr_q) as f32;
+        resvg::render(
+            &tree,
+            Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        pixmap
+            .pixels()
+            .iter()
+            .map(|pixel| {
+                let a = pixel.alpha();
+                let channel = |value: u8| {
+                    if a == 0 || a == 255 {
+                        value
+                    } else {
+                        ((value as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
+                    }
+                };
+                crate::render::pack(
+                    a,
+                    channel(pixel.red()),
+                    channel(pixel.green()),
+                    channel(pixel.blue()),
+                )
+            })
+            .collect()
+    }
+
+    fn premul_channels(pixel: u32) -> [i32; 4] {
+        let a = ((pixel >> 24) & 0xff) as i32;
+        let premul = |shift| (((pixel >> shift) & 0xffu32) as i32 * a + 127) / 255;
+        [a, premul(16), premul(8), premul(0)]
+    }
+
+    #[test]
+    fn layered_atlas_stays_close_to_the_svg_reference() {
+        let cases = [
+            SpriteKey {
+                species: Species::Cat,
+                coat: CoatColor::Orange,
+                eyes: EyeStyle::Normal,
+                mouth: MouthStyle::Normal,
+                tail_q: 16,
+                leg_fl_q: -2,
+                leg_fr_q: 0,
+                dpr_q: 4,
+            },
+            SpriteKey {
+                species: Species::Cat,
+                coat: CoatColor::Calico,
+                eyes: EyeStyle::Hearts,
+                mouth: MouthStyle::Tongue,
+                tail_q: -24,
+                leg_fl_q: 2,
+                leg_fr_q: -4,
+                dpr_q: 8,
+            },
+            SpriteKey {
+                species: Species::Pig,
+                coat: CoatColor::Pink,
+                eyes: EyeStyle::Wide,
+                mouth: MouthStyle::Smile,
+                tail_q: 0,
+                leg_fl_q: 0,
+                leg_fr_q: 2,
+                dpr_q: 8,
+            },
+            SpriteKey {
+                species: Species::Bear,
+                coat: CoatColor::Black,
+                eyes: EyeStyle::Stars,
+                mouth: MouthStyle::Grumpy,
+                tail_q: 0,
+                leg_fl_q: 2,
+                leg_fr_q: 2,
+                dpr_q: 12,
+            },
+        ];
+        for key in cases {
+            let actual = compose(key);
+            let reference = reference_pixels(key);
+            let mut total_error = 0u64;
+            let mut large_error = 0usize;
+            for (actual, reference) in actual.iter().zip(&reference) {
+                let actual = premul_channels(*actual);
+                let reference = premul_channels(*reference);
+                let error: i32 = actual
+                    .iter()
+                    .zip(reference)
+                    .map(|(left, right)| (left - right).abs())
+                    .sum();
+                total_error += error as u64;
+                large_error += usize::from(error > 96);
+            }
+            let mean = total_error as f64 / (actual.len() * 4) as f64;
+            let large_ratio = large_error as f64 / actual.len() as f64;
+            assert!(
+                mean <= 6.0 && large_ratio <= 0.035,
+                "{key:?}: mean premul error {mean:.3}, large-pixel ratio {large_ratio:.3}"
+            );
         }
     }
 }

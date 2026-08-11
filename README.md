@@ -7,7 +7,7 @@
 **简体中文** · [English](README.en.md)
 
 **一只住在你桌面上的手绘小动物。**  
-原生小窗 · Rust 状态机 · SVG（resvg）绘制 · **无 WebView**
+原生小窗 · Rust 状态机 · 离线分层图集 · **无 WebView**
 
 [⬇️ 下载](#-下载) · [🛠 构建](#-从源码构建)
 
@@ -52,13 +52,14 @@ cargo run --release          # 或 npm run dev
  ~180×180 置顶透明小窗（跟宠）
       │
       ▼
- SVG（assets/pet.svg）→ resvg 栅格 → CALayer / softbuffer 提交
+ 分层图集（由 assets/pet.svg 离线生成）→ NativeRenderer → CALayer / softbuffer
       ▲
       │
  Rust 行为状态机（src/pet/）
 ```
 
 - macOS：自管 CALayer 透明提交（绕过 softbuffer 丢 alpha）
+- 普通运行不解析 SVG；显式资产编译命令见 [`docs/renderer-assets.md`](docs/renderer-assets.md)
 - 姿态缓存 LRU 限流，避免走路把内存撑爆
 - CPU / Phase 记录见 [`docs/perf.md`](docs/perf.md)
 
