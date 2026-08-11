@@ -67,6 +67,16 @@ tools/benchmark-renderer.sh \
 
 For a wgpu sample, first confirm stderr contains both `renderer=wgpu` and `wgpu path=atlas-direct`, then pass `--backend wgpu-atlas` and the frozen wgpu binary path. Record a fallback run as `wgpu-native-upload-fallback` instead.
 
+On macOS, the complete alternating 4-scenario x 2-backend x 3-round matrix can be run with:
+
+```bash
+tools/benchmark-renderer-ab.sh \
+  /tmp/cat-desk-pet-native \
+  /tmp/cat-desk-pet-wgpu
+```
+
+The wrapper launches each AppKit process inside a PTY, verifies the reported renderer path before sampling, and stops only the exact child process it created.
+
 Results are written under the ignored `benchmark-results/` directory:
 
 - `samples.csv`: raw 1 Hz `%CPU` and RSS samples.
