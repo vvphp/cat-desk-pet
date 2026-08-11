@@ -7,7 +7,7 @@ This document defines the Phase 0 measurement contract for [issue #6](https://gi
 Compare these implementations without changing pet behavior, visual output, input handling, or window semantics:
 
 - `native`: the current CPU raster + platform presentation path.
-- `wgpu-atlas`: a future layered-atlas backend behind the same render snapshot contract.
+- `wgpu-atlas`: the feature-gated direct layered-atlas path behind the same render snapshot contract. Runs that log `native-upload-fallback` must be labelled separately and are not valid `wgpu-atlas` evidence.
 
 Adopt `wgpu-atlas` as the default only when repeated release-build measurements show a material user benefit without regressing transparency, click-through, startup, memory, package size, or supported platforms. Otherwise keep `native`; a hybrid backend is acceptable only when its activation rule is explicit and measurable.
 
@@ -39,11 +39,18 @@ For backend comparisons, run at least three rounds per scenario. Alternate order
 
 ## CPU and memory capture
 
-Build and launch the release binary in one terminal:
+Build and launch the release binaries in one terminal. Keep separate copies so rebuilding one feature set cannot silently replace the other:
 
 ```bash
 cargo build --release
-./target/release/cat-desk-pet --mode walking
+cp target/release/cat-desk-pet /tmp/cat-desk-pet-native
+
+cargo build --release --features renderer-wgpu
+cp target/release/cat-desk-pet /tmp/cat-desk-pet-wgpu
+
+/tmp/cat-desk-pet-native --renderer native --mode walking
+# or:
+/tmp/cat-desk-pet-wgpu --renderer wgpu --mode walking
 ```
 
 Capture its PID and sample it from another terminal:
@@ -57,6 +64,8 @@ tools/benchmark-renderer.sh \
   --seconds 60 \
   --binary target/release/cat-desk-pet
 ```
+
+For a wgpu sample, first confirm stderr contains both `renderer=wgpu` and `wgpu path=atlas-direct`, then pass `--backend wgpu-atlas` and the frozen wgpu binary path. Record a fallback run as `wgpu-native-upload-fallback` instead.
 
 Results are written under the ignored `benchmark-results/` directory:
 

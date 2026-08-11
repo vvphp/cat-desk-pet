@@ -1,0 +1,27 @@
+name: Renderer CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        renderer: [native, wgpu]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test and build native renderer
+        if: matrix.renderer == 'native'
+        run: |
+          cargo test
+          cargo build --release
+      - name: Test and build wgpu renderer
+        if: matrix.renderer == 'wgpu'
+        run: |
+          cargo test --features renderer-wgpu
+          cargo build --release --features renderer-wgpu

@@ -387,13 +387,13 @@ fn mouth_class(m: MouthStyle) -> &'static str {
     }
 }
 
-#[derive(Clone, Copy)]
-struct LayerTransform {
-    rotation_deg: f64,
-    pivot_x: f64,
-    pivot_y: f64,
-    translate_x: f64,
-    translate_y: f64,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LayerTransform {
+    pub rotation_deg: f64,
+    pub pivot_x: f64,
+    pub pivot_y: f64,
+    pub translate_x: f64,
+    pub translate_y: f64,
 }
 
 impl LayerTransform {
@@ -406,14 +406,34 @@ impl LayerTransform {
     };
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AtlasLayerPlan {
+    pub region: &'static AtlasRegion,
+    pub transform: LayerTransform,
+}
+
 fn compose(key: SpriteKey) -> Vec<u32> {
     let (width, height) = sprite_px(key.dpr_q);
     let mut out = vec![0; (width * height) as usize];
-    let mut layer = |name: &str, transform: LayerTransform| {
-        let region = atlas::region(name).unwrap_or_else(|| panic!("missing atlas region {name}"));
-        composite_layer(&mut out, width, height, key.coat, region, transform);
-    };
+    for layer in layer_plan(key) {
+        composite_layer(
+            &mut out,
+            width,
+            height,
+            key.coat,
+            layer.region,
+            layer.transform,
+        );
+    }
+    out
+}
 
+fn layer_plan(key: SpriteKey) -> Vec<AtlasLayerPlan> {
+    let mut layers = Vec::with_capacity(18);
+    let mut layer = |name: &'static str, transform: LayerTransform| {
+        let region = atlas::region(name).unwrap_or_else(|| panic!("missing atlas region {name}"));
+        layers.push(AtlasLayerPlan { region, transform });
+    };
     layer("shadow", LayerTransform::IDENTITY);
     if key.species == Species::Cat {
         layer(
@@ -469,7 +489,32 @@ fn compose(key: SpriteKey) -> Vec<u32> {
             layer("species-bear", LayerTransform::IDENTITY);
         }
     }
-    out
+    layers
+}
+
+#[cfg(feature = "renderer-wgpu")]
+pub(crate) fn atlas_layer_plan(pet: &RenderSnapshot<'_>) -> Vec<AtlasLayerPlan> {
+    layer_plan(key_for(pet, 1.0))
+}
+
+pub(crate) fn bob(pet: &RenderSnapshot<'_>) -> f64 {
+    match pet.mode {
+        Mode::Walking
+        | Mode::GoingHome
+        | Mode::Clingy
+        | Mode::Interested
+        | Mode::Chasing
+        | Mode::Playing
+        | Mode::Trick => pet.walk_phase.sin() * 3.0,
+        Mode::Idle => (pet.idle_t * 1.6).sin() * 1.5,
+        Mode::Pet => 0.0,
+        Mode::Sleeping | Mode::InBed => (pet.sleep_t * 0.8).sin() * 0.8 + 6.0,
+        Mode::Dragged => -8.0,
+        Mode::Dizzy => (pet.dizzy_t * 20.0).sin() * 2.0,
+        Mode::Feeding if pet.eat_anim_t > 0.0 => (pet.eat_anim_t * 14.0).sin() * 2.0,
+        Mode::Gifting => pet.walk_phase.sin() * 1.2,
+        _ => 0.0,
+    }
 }
 
 fn composite_layer(
